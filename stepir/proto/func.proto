@@ -1,9 +1,0 @@
-syntax = "proto3";
-
-package stepir;
-
-message ElemtoElemFunc {
-  oneof elem_elem_fn { Matmul matmul = 1; }
-}
-
-message Matmul {}
