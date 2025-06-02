@@ -1,0 +1,61 @@
+syntax = "proto3";
+
+package stepir;
+
+import "func.proto";
+import "datatype.proto";
+
+message Operation {
+  string name = 1;
+  uint32 id = 2;
+  reserved 3 to 9;
+  oneof op_type {
+    BinaryMap binarymap = 10;
+    OffChipLoad off_chip_load = 11;
+    OffChipStore off_chip_store = 12;
+    RepeatStatic repeat_static = 13;
+  }
+}
+
+message BinaryMap {
+  uint32 input_id1 = 1;
+  optional uint32 stream_idx1 = 2;
+  uint32 input_id2 = 3;
+  optional uint32 stream_idx2 = 4;
+  ElemtoElemFunc func = 5;
+  uint32 compute_bw = 6;
+  bool write_back_mu = 7;
+  DataType dtype_a = 8;
+  DataType dtype_b = 9;
+  bool logging = 10;
+}
+
+message OffChipLoad {
+  repeated uint32 tensor_shape_tiled = 1;
+  repeated uint32 stride = 2;
+  repeated uint32 out_shape_tiled = 3;
+  string npy_path = 4;
+  uint32 tile_row = 5;
+  uint32 tile_col = 6;
+  uint32 n_byte = 7;
+  DataType dtype = 8;
+  bool logging = 9;
+}
+
+message OffChipStore {
+  uint32 input_id = 1;
+  optional uint32 stream_idx = 2;
+  repeated uint32 tensor_shape_tiled = 3;
+  string store_path = 4;
+  uint32 tile_row = 5;
+  uint32 tile_col = 6;
+  DataType dtype = 7;
+  bool logging = 8;
+}
+
+message RepeatStatic {
+  uint32 input_id = 1;
+  optional uint32 stream_idx = 2;
+  uint32 repeat_factor = 3;
+  DataType dtype = 4;
+}

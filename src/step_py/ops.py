@@ -32,6 +32,7 @@ class OffChipLoad(StepOps):
 
     def __init__(
         self,
+        graph: List[StepOps],
         underlying: torch.Tensor,
         stride: Tuple[int, ...],
         out_shape_tiled: Tuple[int, ...],
@@ -44,8 +45,8 @@ class OffChipLoad(StepOps):
         self.tensor_shape_tiled = tuple(
             list(underlying.shape[:-2])
             + [
-                underlying.shape[-2] / tile_row,
-                underlying.shape[-1] / tile_col,
+                underlying.shape[-2] // tile_row,
+                underlying.shape[-1] // tile_col,
             ]
         )
         self.stride = stride
@@ -72,10 +73,16 @@ class OffChipLoad(StepOps):
         else:
             raise ValueError(f"Unsupported dtype: {underlying.dtype}")
 
+        graph.append(self)
+
     @property
     def stream(self) -> Stream:
         """The stream of the operation."""
         return self._stream
+
+    def __str__(self):
+        cls = self.__class__.__name__
+        return f"{cls}_{self.instance_id}"
 
 
 class RepeatStatic(StepOps):
@@ -83,7 +90,7 @@ class RepeatStatic(StepOps):
     repeat_factor: int
     _stream: Stream
 
-    def __init__(self, input: StepOps, repeat_factor: int):
+    def __init__(self, graph: List[StepOps], input: StepOps, repeat_factor: int):
         super().__init__()
         self.input = input
         self.repeat_factor = repeat_factor
@@ -91,10 +98,16 @@ class RepeatStatic(StepOps):
             dtype=input.stream.dtype, shape=tuple(input.stream.shape + (repeat_factor,))
         )
 
+        graph.append(self)
+
     @property
     def stream(self) -> Stream:
         """The stream of the operation."""
         return self._stream
+
+    def __str__(self):
+        cls = self.__class__.__name__
+        return f"{cls}_{self.instance_id}"
 
 
 class BinaryMap(StepOps):
@@ -106,7 +119,13 @@ class BinaryMap(StepOps):
     _stream: Stream
 
     def __init__(
-        self, in1: StepOps, in2: StepOps, fn: str, write_back_mu: bool, comp_bw: int
+        self,
+        graph: List[StepOps],
+        in1: StepOps,
+        in2: StepOps,
+        fn: str,
+        write_back_mu: bool,
+        comp_bw: int,
     ):
         assert (
             in1.stream.shape == in2.stream.shape
@@ -125,28 +144,39 @@ class BinaryMap(StepOps):
             shape=self.in1.stream.shape,
         )
 
+        graph.append(self)
+
     @property
     def stream(self) -> Stream:
         """The stream of the operation."""
         return self._stream
 
+    def __str__(self):
+        cls = self.__class__.__name__
+        return f"{cls}_{self.instance_id}"
+
 
 class OffChipStore(StepOps):
+    input: StepOps
     tensor_shape_tiled: Tuple[int, ...]
     tile_row: int
     tile_col: int
+    store_path: str
 
     def __init__(
         self,
-        tensor_shape_tiled: Tuple[int, ...],
-        tile_row: int,
-        tile_col: int,
+        graph: List[StepOps],
+        input: StepOps,
     ):
         super().__init__()
 
-        self.tensor_shape_tiled = tensor_shape_tiled
-        self.tile_row = tile_row
-        self.tile_col = tile_col
+        self.input = input
+        self.tensor_shape_tiled = input.stream.shape
+        self.tile_row = input.stream.dtype.shape[0]
+        self.tile_col = input.stream.dtype.shape[1]
+        self.store_path = f"str(self).npy"
+
+        graph.append(self)
 
     @property
     def stream(self) -> Stream:
@@ -159,3 +189,7 @@ class OffChipStore(StepOps):
             self.tensor_shape_tiled[-2] * self.tile_row,
             self.tensor_shape_tiled[-1] * self.tile_col,
         )
+
+    def __str__(self):
+        cls = self.__class__.__name__
+        return f"{cls}_{self.instance_id}"

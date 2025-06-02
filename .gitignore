@@ -1,2 +1,5 @@
 .vscode/
 *.pyc
+*.npy
+*.pb
+*_pb2.py

@@ -1,6 +1,9 @@
 import torch
 from step_py.ops import OffChipLoad, OffChipStore, BinaryMap, RepeatStatic
 from step_py.functions import map_fn
+from sim import simulate
+from utils.shape_checking import is_valid_view
+
 
 # ================ Setting up the model and data ================
 B = 32
@@ -26,16 +29,23 @@ weight_stride = (
 
 # ================ STeP Program ================
 
+step_graph = []
+
 input_stream = OffChipLoad(
+    graph=step_graph,
     underlying=input,
     stride=(H // tile_k_gen_q, 1),
     out_shape_tiled=(B // tile_m_gen_q, H // tile_k_gen_q),
     tile_row=tile_m_gen_q,
     tile_col=tile_k_gen_q,
 )
-repeat_input_stream = RepeatStatic(input=input_stream, repeat_factor=H // tile_n_gen_q)
+
+repeat_input_stream = RepeatStatic(
+    graph=step_graph, input=input_stream, repeat_factor=H // tile_n_gen_q
+)
 
 weight_stream = OffChipLoad(
+    graph=step_graph,
     underlying=weight,
     stride=weight_stride,
     out_shape_tiled=(B // tile_m_gen_q, H // tile_k_gen_q, H // tile_n_gen_q),
@@ -43,15 +53,25 @@ weight_stream = OffChipLoad(
     tile_col=tile_n_gen_q,
 )
 
-matmul = BinaryMap(repeat_input_stream, weight_stream, map_fn.Matmul(), True, 1022)
+
+matmul = BinaryMap(
+    step_graph, repeat_input_stream, weight_stream, map_fn.Matmul(), True, 1022
+)
+
 
 output_stream = OffChipStore(
-    tensor_shape_tiled=(B // tile_m_gen_q, H // tile_n_gen_q),
-    tile_row=tile_m_gen_q,
-    tile_col=tile_n_gen_q,
+    graph=step_graph,
+    input=matmul,
 )
 
-assert output_stream.get_untiled_shape() == tuple(gold.shape)
+# ================ Check whether the shapes match ================
+
+assert is_valid_view(gold, output_stream.get_untiled_shape())
+
 print(
-    f"Passed! Output Stream({output_stream.get_untiled_shape()}) == Gold Shape({tuple(gold.shape)})"
+    f"Passed! Gold Shape({tuple(gold.shape)}) can be viewed as Output Stream({output_stream.get_untiled_shape()}) "
 )
+
+# ================ Print the STeP Graph ================
+print([str(op) for op in step_graph])
+simulate(step_graph)

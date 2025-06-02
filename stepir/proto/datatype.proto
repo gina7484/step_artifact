@@ -1,0 +1,13 @@
+syntax = "proto3";
+
+package stepir;
+
+message DataType {
+  oneof type {
+    F16 f16 = 1;
+    F32 f32 = 2;
+  }
+}
+
+message F16 {}
+message F32 {}
