@@ -1,3 +1,6 @@
 [submodule "step_perf_ir"]
 	path = step_perf_ir
 	url = https://github.com/stanford-ppl/step_perf_ir.git
+[submodule "step-perf"]
+	path = step-perf
+	url = https://github.com/gina7484/step-perf.git
