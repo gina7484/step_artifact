@@ -3,14 +3,15 @@ from step_py.ops import StepOps, OffChipLoad, OffChipStore, BinaryMap, RepeatSta
 from proto import datatype_pb2, func_pb2, graph_pb2, ops_pb2
 from step_py.datatype import Float32
 import numpy as np
-import step_perf 
+import step_perf
+
 
 def simulate(graph: List[StepOps]):
     protobuf_file = "graph.pb"
 
     serialize(graph, protobuf_file)
 
-    a = step_perf.run_graph()  # pylint: disable=no-member
+    a = step_perf.run_graph(protobuf_file)  # pylint: disable=no-member
     print(a)
 
 
