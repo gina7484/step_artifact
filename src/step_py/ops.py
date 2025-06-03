@@ -1,7 +1,7 @@
 from abc import ABC, abstractmethod, abstractproperty
 import torch
 from typing import List, Tuple
-from functions.map_fn import MapFn
+from step_py.functions.map_fn import MapFn
 from step_py.datatype import Stream, Tile, Float16, Float32
 
 
@@ -115,7 +115,7 @@ class BinaryMap(StepOps):
     in2: StepOps
     fn: MapFn
     write_back_mu: bool  # whether the consumer is a bufferize or not
-    comp_bw: int
+    compute_bw: int
     _stream: Stream
 
     def __init__(
@@ -125,7 +125,7 @@ class BinaryMap(StepOps):
         in2: StepOps,
         fn: str,
         write_back_mu: bool,
-        comp_bw: int,
+        compute_bw: int,
     ):
         assert (
             in1.stream.shape == in2.stream.shape
@@ -137,7 +137,7 @@ class BinaryMap(StepOps):
         self.in2 = in2
         self.fn = fn
         self.write_back_mu = write_back_mu
-        self.comp_bw = comp_bw
+        self.compute_bw = compute_bw
 
         self._stream = Stream(
             dtype=self.fn.apply((self.in1.stream.dtype, self.in2.stream.dtype)),
@@ -161,12 +161,13 @@ class OffChipStore(StepOps):
     tensor_shape_tiled: Tuple[int, ...]
     tile_row: int
     tile_col: int
-    store_path: str
+    store_file_name: str
 
     def __init__(
         self,
         graph: List[StepOps],
         input: StepOps,
+        store_file_name: str = "output.npy",
     ):
         super().__init__()
 
@@ -174,7 +175,7 @@ class OffChipStore(StepOps):
         self.tensor_shape_tiled = input.stream.shape
         self.tile_row = input.stream.dtype.shape[0]
         self.tile_col = input.stream.dtype.shape[1]
-        self.store_path = f"str(self).npy"
+        self.store_file_name = store_file_name
 
         graph.append(self)
 

@@ -1,20 +1,19 @@
 import torch
 from step_py.ops import OffChipLoad, OffChipStore, BinaryMap, RepeatStatic
 from step_py.functions import map_fn
-from sim import simulate
+from sim import simulate, HBMConfig
 from utils.shape_checking import is_valid_view
-
+from utils.gold_checking import check_gold_tensor
 
 # ================ Setting up the model and data ================
 B = 32
 H = 64
 
-model = torch.nn.Linear(H, H)
-
+model = torch.nn.Linear(H, H, bias=False)
 input = torch.randn(B, H)
-gold = model(input)
+weight = model.weight.T.detach().clone().contiguous()
+gold = torch.matmul(input, weight)
 
-weight = model.weight
 
 # ================ Generating Tiling Schedule ================
 tile_m_gen_q = 16
@@ -44,6 +43,8 @@ repeat_input_stream = RepeatStatic(
     graph=step_graph, input=input_stream, repeat_factor=H // tile_n_gen_q
 )
 
+# Combined operation
+
 weight_stream = OffChipLoad(
     graph=step_graph,
     underlying=weight,
@@ -62,16 +63,31 @@ matmul = BinaryMap(
 output_stream = OffChipStore(
     graph=step_graph,
     input=matmul,
+    store_file_name="output",
 )
 
 # ================ Check whether the shapes match ================
 
-assert is_valid_view(gold, output_stream.get_untiled_shape())
-
-print(
-    f"Passed! Gold Shape({tuple(gold.shape)}) can be viewed as Output Stream({output_stream.get_untiled_shape()}) "
+assert is_valid_view(
+    gold,
+    output_stream.get_untiled_shape(),
 )
+print("The stream shapes match")
+
 
 # ================ Print the STeP Graph ================
 print([str(op) for op in step_graph])
-simulate(step_graph)
+simulate(
+    step_graph,
+    False,
+    HBMConfig(64, 8, 4, 4, 1, 14),
+)
+
+# ================ Check the output ================
+check_gold_tensor(
+    "output",
+    gold.reshape(
+        2, 16, 64
+    ),  # Reshaping the gold because we're not using a flatten after map
+    # Once we add a flatten after map, we can remove the reshape here
+)

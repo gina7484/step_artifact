@@ -2,7 +2,7 @@ from dataclasses import dataclass
 from typing import List, Tuple, Union
 from abc import ABC
 
-from dyndim import DynDim
+from step_py.dyndim import DynDim
 
 
 class ElementTP(ABC):

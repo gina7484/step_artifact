@@ -3,3 +3,4 @@
 *.npy
 *.pb
 *_pb2.py
+*.json
