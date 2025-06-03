@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from typing import List
 from step_py.ops import StepOps, OffChipLoad, OffChipStore, BinaryMap, RepeatStatic
 from proto import datatype_pb2, func_pb2, graph_pb2, ops_pb2
@@ -6,17 +7,37 @@ import numpy as np
 import step_perf
 
 
+@dataclass
+class HBMConfig:
+    channel_num: int
+    per_channel_latency: int
+    per_channel_init_interval: int
+    per_channel_outstanding: int
+    per_channel_start_up_time: int
+
+
 def simulate(graph: List[StepOps]):
-    protobuf_file = "graph.pb"
+    protobuf_file = "/home/ginasohn/step_tl/graph.pb"
 
     serialize(graph, protobuf_file)
 
-    a = step_perf.run_graph(protobuf_file)  # pylint: disable=no-member
+    a = step_perf.run_graph(  # pylint: disable=no-member
+        protobuf_file,
+        False,
+        HBMConfig(
+            channel_num=8,
+            per_channel_latency=4,
+            per_channel_init_interval=4,
+            per_channel_outstanding=1,
+            per_channel_start_up_time=14,
+        ),
+    )
     print(a)
 
 
+# pylint: disable=no-member
 def serialize(graph: List[StepOps], protobuf_file: str):
-    prog_graph = graph_pb2.ProgramGraph()
+    prog_graph = graph_pb2.ProgramGraph()  # pylint: disable=no-member
     prog_graph.name = ""
 
     for op in graph:
@@ -31,7 +52,6 @@ def serialize(graph: List[StepOps], protobuf_file: str):
             offchipstore_pb.tile_row = op.tile_row
             offchipstore_pb.tile_col = op.tile_col
             offchipstore_pb.store_path = op.store_path
-            offchipstore_pb.logging = False
 
             if isinstance(op.input.stream.dtype.dtype, Float32):
                 dtype = datatype_pb2.DataType()
@@ -49,7 +69,6 @@ def serialize(graph: List[StepOps], protobuf_file: str):
             offchipload_pb.tile_row = op.tile_row
             offchipload_pb.tile_col = op.tile_col
             offchipload_pb.n_byte = op.n_byte
-            offchipload_pb.logging = False
 
             if isinstance(op.stream.dtype.dtype, Float32):
                 dtype = datatype_pb2.DataType()
@@ -58,10 +77,10 @@ def serialize(graph: List[StepOps], protobuf_file: str):
             else:
                 raise ValueError(f"Unsupported data type: {op.stream.dtype.dtype}")
 
-            file_path = f"{str(op)}.py"
+            file_path = f"{str(op)}"
             np.save(file_path, op.underlying.detach().numpy())
-            offchipload_pb.npy_path = file_path
-            print(f"Saved {str(op)} data to {file_path}")
+            offchipload_pb.npy_path = file_path + ".npy"
+            print(f"Saved {str(op)} data to {file_path+ ".npy"}")
 
             operator.off_chip_load.CopyFrom(offchipload_pb)
         elif isinstance(op, BinaryMap):
