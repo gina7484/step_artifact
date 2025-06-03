@@ -38,12 +38,13 @@ input_stream = OffChipLoad(
     tile_row=tile_m_gen_q,
     tile_col=tile_k_gen_q,
 )
+# print(f"input_stream shape: {input_stream.stream.shape}\n")
 
 repeat_input_stream = RepeatStatic(
     graph=step_graph, input=input_stream, repeat_factor=H // tile_n_gen_q
 )
+# print(f"repeat_input_stream shape: {repeat_input_stream.stream.shape}\n")
 
-# Combined operation
 
 weight_stream = OffChipLoad(
     graph=step_graph,
@@ -53,11 +54,13 @@ weight_stream = OffChipLoad(
     tile_row=tile_k_gen_q,
     tile_col=tile_n_gen_q,
 )
+# print(f"weight_stream shape: {weight_stream.stream.shape}\n")
 
 
 matmul = BinaryMap(
     step_graph, repeat_input_stream, weight_stream, map_fn.Matmul(), True, 1022
 )
+# print(f"matmul shape: {matmul.stream.shape}\n")
 
 
 output_stream = OffChipStore(
