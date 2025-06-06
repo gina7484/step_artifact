@@ -99,11 +99,11 @@ save_graph_format(step_graph, output_filename, ["png"])
 
 
 # # ================ Simulate & Check the output ================
-# simulate(
-#     step_graph,
-#     True,  # logging
-#     HBMConfig(64, 8, 4, 4, 1, 14),
-# )
+simulate(
+    step_graph,
+    False,  # logging
+    HBMConfig(64, 8, 4, 4, 1, 14),
+)
 #
 # check_gold_tensor(
 #     "output",
