@@ -22,12 +22,12 @@ def simulate(graph: List[StepOps], logging: bool, hbm_config: HBMConfig):
 
     serialize(graph, protobuf_file)
 
-    # a = step_perf.run_graph(  # pylint: disable=no-member
-    #     protobuf_file,
-    #     logging,
-    #     hbm_config,
-    # )
-    # print(a)
+    a = step_perf.run_graph(  # pylint: disable=no-member
+        protobuf_file,
+        logging,
+        hbm_config,
+    )
+    print(a)
 
 
 # pylint: disable=no-member
@@ -70,6 +70,7 @@ def serialize(graph: List[StepOps], protobuf_file: str):
             offchipstore_pb.tile_row = op.tile_row
             offchipstore_pb.tile_col = op.tile_col
             offchipstore_pb.store_path = op.store_file_name
+            offchipstore_pb.par_dispatch = op.par_dispatch
 
             operator.off_chip_store.CopyFrom(offchipstore_pb)
         elif isinstance(op, OffChipLoad):
@@ -80,6 +81,7 @@ def serialize(graph: List[StepOps], protobuf_file: str):
             offchipload_pb.tile_row = op.tile_row
             offchipload_pb.tile_col = op.tile_col
             offchipload_pb.n_byte = op.n_byte
+            offchipload_pb.par_dispatch = op.par_dispatch
 
             offchipload_pb.dtype.CopyFrom(to_pb_datatype(op.stream.dtype.dtype))
 
@@ -145,6 +147,7 @@ def serialize(graph: List[StepOps], protobuf_file: str):
             else:
                 broadcast_pb.input_id = op.input.instance_id
 
+            broadcast_pb.num_consumers = op.num_consumers
             broadcast_pb.dtype.CopyFrom(to_pb_datatype(op.stream_idx(0).dtype.dtype))
 
             operator.broadcast.CopyFrom(broadcast_pb)

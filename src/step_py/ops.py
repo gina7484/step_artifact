@@ -72,6 +72,7 @@ class OffChipLoad(StepOps):
     tile_row: int
     tile_col: int
     n_byte: int
+    par_dispatch: int
     _stream: Stream
 
     def __init__(
@@ -81,6 +82,7 @@ class OffChipLoad(StepOps):
         out_shape_tiled: Tuple[int, ...],
         tile_row: int,
         tile_col: int,
+        par_dispatch: int,
     ):
         super().__init__()
 
@@ -96,6 +98,7 @@ class OffChipLoad(StepOps):
         self.out_shape_tiled = out_shape_tiled
         self.tile_row = tile_row
         self.tile_col = tile_col
+        self.par_dispatch = par_dispatch
 
         if underlying.dtype == torch.float32:
             self.n_byte = 4
@@ -363,11 +366,13 @@ class OffChipStore(StepOps):
     tile_row: int
     tile_col: int
     store_file_name: str
+    par_dispatch: int
 
     def __init__(
         self,
         graph: MultiDiGraph,
         input: Union[StepOps, Tuple[StepOps, int]],
+        par_dispatch: int,
         store_file_name: str = "output.npy",
     ):
         super().__init__()
@@ -377,6 +382,7 @@ class OffChipStore(StepOps):
         self.tile_row = input.stream.dtype.shape[0]
         self.tile_col = input.stream.dtype.shape[1]
         self.store_file_name = store_file_name
+        self.par_dispatch = par_dispatch
 
         graph.add_edge(input, self)
 

@@ -41,6 +41,7 @@ input_stream = OffChipLoad(
     out_shape_tiled=(B // tile_m_gen_q, H // tile_k_gen_q),
     tile_row=tile_m_gen_q,
     tile_col=tile_k_gen_q,
+    par_dispatch=4,
 )
 # print(f"input_stream shape: {input_stream.stream.shape}\n")
 
@@ -57,6 +58,7 @@ weight_stream = OffChipLoad(
     out_shape_tiled=(B // tile_m_gen_q, H // tile_k_gen_q, H // tile_n_gen_q),
     tile_row=tile_k_gen_q,
     tile_col=tile_n_gen_q,
+    par_dispatch=4,
 )
 # print(f"weight_stream shape: {weight_stream.stream.shape}\n")
 
@@ -70,12 +72,14 @@ matmul = BinaryMap(
 output_stream1 = OffChipStore(
     graph=step_graph,
     input=matmul,
+    par_dispatch=4,
     store_file_name="output1",
 )
 
 output_stream2 = OffChipStore(
     graph=step_graph,
     input=matmul,
+    par_dispatch=4,
     store_file_name="output2",
 )
 
@@ -102,13 +106,21 @@ save_graph_format(step_graph, output_filename, ["png"])
 simulate(
     step_graph,
     False,  # logging
-    HBMConfig(64, 8, 4, 4, 1, 14),
+    HBMConfig(64, 8, 2, 2, 1, 14),
 )
-#
-# check_gold_tensor(
-#     "output",
-#     gold.reshape(
-#         2, 16, 64
-#     ),  # Reshaping the gold because we're not using a flatten after map
-#     # Once we add a flatten after map, we can remove the reshape here
-# )
+
+check_gold_tensor(
+    "output1",
+    gold.reshape(
+        2, 16, 64
+    ),  # Reshaping the gold because we're not using a flatten after map
+    # Once we add a flatten after map, we can remove the reshape here
+)
+
+check_gold_tensor(
+    "output2",
+    gold.reshape(
+        2, 16, 64
+    ),  # Reshaping the gold because we're not using a flatten after map
+    # Once we add a flatten after map, we can remove the reshape here
+)
