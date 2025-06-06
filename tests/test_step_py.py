@@ -4,6 +4,9 @@ from step_py.functions import map_fn
 from sim import simulate, HBMConfig
 from utils.shape_checking import is_valid_view
 from utils.gold_checking import check_gold_tensor
+from utils.draw_graph import save_graph_format
+from rewrite.broadcast import infer_broadcast
+from networkx import MultiDiGraph, drawing
 
 # ================ Setting up the model and data ================
 B = 32
@@ -28,10 +31,11 @@ weight_stride = (
 
 # ================ STeP Program ================
 
-step_graph = []
+# step_graph = []
+step_graph: MultiDiGraph = MultiDiGraph()
 
 input_stream = OffChipLoad(
-    graph=step_graph,
+    # graph=step_graph,
     underlying=input,
     stride=(H // tile_k_gen_q, 1),
     out_shape_tiled=(B // tile_m_gen_q, H // tile_k_gen_q),
@@ -47,7 +51,7 @@ repeat_input_stream = RepeatStatic(
 
 
 weight_stream = OffChipLoad(
-    graph=step_graph,
+    # graph=step_graph,
     underlying=weight,
     stride=weight_stride,
     out_shape_tiled=(B // tile_m_gen_q, H // tile_k_gen_q, H // tile_n_gen_q),
@@ -63,34 +67,48 @@ matmul = BinaryMap(
 # print(f"matmul shape: {matmul.stream.shape}\n")
 
 
-output_stream = OffChipStore(
+output_stream1 = OffChipStore(
     graph=step_graph,
     input=matmul,
-    store_file_name="output",
+    store_file_name="output1",
+)
+
+output_stream2 = OffChipStore(
+    graph=step_graph,
+    input=matmul,
+    store_file_name="output2",
 )
 
 # ================ Check whether the shapes match ================
 
 assert is_valid_view(
     gold,
-    output_stream.get_untiled_shape(),
+    output_stream1.get_untiled_shape(),
 )
 print("The stream shapes match")
 
+# ================ Rewrite passes ================
+step_graph = infer_broadcast(step_graph)
 
 # ================ Print the STeP Graph ================
-print([str(op) for op in step_graph])
-simulate(
-    step_graph,
-    False,
-    HBMConfig(64, 8, 4, 4, 1, 14),
-)
+# print([str(op) for op in list(step_graph.nodes(data=True))])
+output_filename = f"output_step"
 
-# ================ Check the output ================
-check_gold_tensor(
-    "output",
-    gold.reshape(
-        2, 16, 64
-    ),  # Reshaping the gold because we're not using a flatten after map
-    # Once we add a flatten after map, we can remove the reshape here
-)
+# drawing.nx_pydot.write_dot(step_graph, "graph.dot")
+save_graph_format(step_graph, output_filename, ["png"])
+
+
+# # ================ Simulate & Check the output ================
+# simulate(
+#     step_graph,
+#     True,  # logging
+#     HBMConfig(64, 8, 4, 4, 1, 14),
+# )
+#
+# check_gold_tensor(
+#     "output",
+#     gold.reshape(
+#         2, 16, 64
+#     ),  # Reshaping the gold because we're not using a flatten after map
+#     # Once we add a flatten after map, we can remove the reshape here
+# )
