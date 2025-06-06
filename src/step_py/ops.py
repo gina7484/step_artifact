@@ -180,7 +180,8 @@ class RepeatStatic(StepOps):
             shape=tuple(input_stream.shape + (repeat_factor,)),
         )
 
-        graph.add_edge(input, self)
+        input_node = input if isinstance(input, StepOps) else input[0]
+        graph.add_edge(input_node, self)
 
     @property
     def stream(self) -> Stream:
@@ -255,8 +256,11 @@ class BinaryMap(StepOps):
             dtype=self.fn.apply((in1_stream.dtype, in2_stream.dtype)),
             shape=self.in1.stream.shape,
         )
+        
+        input_node1 = in1 if isinstance(in1, StepOps) else in1[0]
+        input_node2 = in2 if isinstance(in2, StepOps) else in2[0]
 
-        graph.add_edges_from([(in1, self), (in2, self)])
+        graph.add_edges_from([(input_node1, self), (input_node2, self)])
 
     @property
     def stream(self) -> Stream:
@@ -323,7 +327,8 @@ class Broadcast(StepOps):
             for _ in range(num_consumers)
         ]
 
-        graph.add_edge(input, self)
+        input_node = input if isinstance(input, StepOps) else input[0]
+        graph.add_edge(input_node, self)
 
     @property
     def stream(self) -> Stream:
@@ -384,7 +389,8 @@ class OffChipStore(StepOps):
         self.store_file_name = store_file_name
         self.par_dispatch = par_dispatch
 
-        graph.add_edge(input, self)
+        input_node = input if isinstance(input, StepOps) else input[0]
+        graph.add_edge(input_node, self)
 
     @property
     def stream(self) -> Stream:
@@ -449,12 +455,14 @@ class FlatPartition(StepOps):
 
         in_stream: Stream = get_stream(input)
         control_stream: Stream = get_stream(control)
-        self._stream = []
-        # self._stream = [
-        #     Stream(dtype=in_stream.dtype, shape=TODO) for _ in range(num_consumers)
-        # ]
+        self._stream = [
+            Stream(dtype=in_stream.dtype, shape=TODO) for _ in range(num_consumers)
+        ]
 
-        graph.add_edge(input, self)
+        input_node = input if isinstance(input, StepOps) else input[0]
+        control_node = control if isinstance(control, StepOps) else control[0]
+        graph.add_edge(input_node, self)
+        graph.add_edge(control_node, self)
 
     @property
     def stream(self) -> Stream:
