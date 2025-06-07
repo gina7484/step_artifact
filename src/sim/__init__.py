@@ -17,8 +17,7 @@ class HBMConfig:
     per_channel_start_up_time: int
 
 
-def simulate(graph: List[StepOps], logging: bool, hbm_config: HBMConfig):
-    protobuf_file = "/home/ginasohn/step_tl/graph.pb"
+def simulate(graph: List[StepOps], logging: bool, hbm_config: HBMConfig, protobuf_file: str):
 
     serialize(graph, protobuf_file)
 
@@ -41,12 +40,16 @@ def to_pb_datatype(dtype: ElementTP) -> datatype_pb2.DataType:
 
 
 # pylint: disable=no-member
-def serialize(graph: List[StepOps], protobuf_file: str):
+def serialize(graph: MultiDiGraph, protobuf_file: str):
     prog_graph = graph_pb2.ProgramGraph()  # pylint: disable=no-member
     prog_graph.name = ""
 
-    for op in graph:
+    for op_node in graph.nodes(data=True):
         operator = prog_graph.operators.add()
+        if isinstance(op_node, Tuple):
+            op, _ = op_node
+        else:
+            op = op_node
         operator.name = str(op)
         operator.id = op.instance_id
 
@@ -151,6 +154,35 @@ def serialize(graph: List[StepOps], protobuf_file: str):
             broadcast_pb.dtype.CopyFrom(to_pb_datatype(op.stream_idx(0).dtype.dtype))
 
             operator.broadcast.CopyFrom(broadcast_pb)
+        elif isinstance(op, FlatPartition):
+            flatpartition_pb = ops_pb2.FlatPartition()
+
+            if isinstance(op.input, Tuple):
+                input_node, idx = op.input
+                flatpartition_pb.input_stream_idx = idx
+                flatpartition_pb.input_id = input_node.instance_id
+                flatpartition_pb.input_dtype.CopyFrom(to_pb_datatype(input_node.stream_idx(idx).dtype.dtype))
+            else:
+                flatpartition_pb.input_id = op.input.instance_id
+                flatpartition_pb.input_dtype.CopyFrom(to_pb_datatype(op.input.stream.dtype.dtype))
+
+
+            if isinstance(op.control, Tuple):
+                control_node, idx = op.control
+                flatpartition_pb.control_stream_idx = idx
+                flatpartition_pb.control_id = control_node.instance_id
+                flatpartition_pb.control_dtype.CopyFrom(to_pb_datatype(control_node.stream_idx(idx).dtype.dtype))
+
+            else:
+                flatpartition_pb.control_id = op.control.instance_id
+                flatpartition_pb.control_dtype.CopyFrom(to_pb_datatype(op.control.stream.dtype.dtype))
+
+            flatpartition_pb.partition_rank = op.partition_rank
+            flatpartition_pb.num_consumers = op.num_consumers
+            flatpartition_pb.switch_cycles.extend(list(op.switch_cycles))
+            flatpartition_pb.write_back_mu = op.write_back_mu
+
+            operator.flat_partition.CopyFrom(flatpartition_pb)
         else:
             raise ValueError(f"Unsupported operation type: {type(op)}")
 

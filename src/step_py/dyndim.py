@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from typing import Optional
-import torch
+import sympy
 
 
 @dataclass
@@ -14,7 +14,7 @@ class DynDim:
     symbolically.
     """
 
-    expr: torch.SymInt
+    expr: sympy.Symbol
 
     def __add__(self, other):
         return DynDim(self.expr + other)

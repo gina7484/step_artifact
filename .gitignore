@@ -6,3 +6,5 @@
 *.json
 *.png
 *.svg
+target/
+.github/

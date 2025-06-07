@@ -1,9 +1,10 @@
-from abc import ABC, abstractmethod, abstractproperty
+from abc import ABC, abstractmethod
 import torch
 from typing import List, Tuple, Union
 from step_py.functions.map_fn import MapFn
 from step_py.datatype import Stream, Tile, Float16, Float32
 from networkx import MultiDiGraph
+import sympy
 
 
 def get_stream(input: Union["StepOps", Tuple["StepOps", int]]) -> Stream:
@@ -438,6 +439,9 @@ class FlatPartition(StepOps):
     _input: Union[StepOps, Tuple[StepOps, int]]
     control: Union[StepOps, Tuple[StepOps, int]]
     num_consumers: int
+    partition_rank: int
+    switch_cycles: List[int]
+    write_back_mu: bool
     _stream: List[Stream]
 
     def __init__(
@@ -445,6 +449,9 @@ class FlatPartition(StepOps):
         graph: MultiDiGraph,
         input: Union[StepOps, Tuple[StepOps, int]],
         control: Union[StepOps, Tuple[StepOps, int]],
+        partition_rank: int,
+        switch_cycles: List[int],
+        write_back_mu: bool,
         num_consumers: int,
     ):
         super().__init__()
@@ -452,11 +459,15 @@ class FlatPartition(StepOps):
         self._input = input
         self.control = control
         self.num_consumers = num_consumers
+        self.partition_rank = partition_rank
+        self.switch_cycles = switch_cycles
+        self.write_back_mu = write_back_mu
 
         in_stream: Stream = get_stream(input)
         control_stream: Stream = get_stream(control)
+        new_names = sympy.symbols(f"{str(self)}_0:{num_consumers}")
         self._stream = [
-            Stream(dtype=in_stream.dtype, shape=TODO) for _ in range(num_consumers)
+            Stream(dtype=in_stream.dtype, shape=[new_names[i]] + in_stream.shape[-partition_rank:]) for i in range(num_consumers)
         ]
 
         input_node = input if isinstance(input, StepOps) else input[0]
@@ -504,3 +515,5 @@ class FlatPartition(StepOps):
             self.control = new_input
         else:
             raise ValueError("Wrong org_input")
+
+

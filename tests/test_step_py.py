@@ -107,6 +107,7 @@ simulate(
     step_graph,
     False,  # logging
     HBMConfig(64, 8, 2, 2, 1, 14),
+    "/scratch/zgh23/step_tl/graph.pb"
 )
 
 check_gold_tensor(
