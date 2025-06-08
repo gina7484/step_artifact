@@ -20,7 +20,14 @@ class MapFn(ABC):
 class Matmul(MapFn):
     """
     A function that performs matrix multiplication.
+    If `weight_transposed` is False, the tile shapes should be [M,K], [K,N]
     """
+
+    weight_transposed: bool
+
+    def __init__(self, weight_transposed: bool = False):
+        super().__init__()
+        self.weight_transposed = weight_transposed
 
     def apply(self, input_tp: Tuple) -> Tile:
         if len(input_tp) != 2:
@@ -32,11 +39,24 @@ class Matmul(MapFn):
         if not (isinstance(tile_a, Tile) and isinstance(tile_b, Tile)):
             raise TypeError("Both inputs to Matmul must be of type Tile.")
 
-        if tile_a.shape[-1] != tile_b.shape[-2]:
-            raise ValueError("Incompatible shapes for matrix multiplication.")
+        if not self.weight_transposed:  # [M,K] x [K,N]
+            if tile_a.shape[1] != tile_b.shape[0]:
+                raise ValueError("Incompatible shapes for matrix multiplication.")
 
-        # The resulting shape will be (tile_a.shape[:-1], tile_b.shape[-1])
-        result_shape = tile_a.shape[:-1] + (tile_b.shape[-1],)
+            # The resulting shape will be (tile_a.shape[:-1], tile_b.shape[1])
+            result_shape = (
+                tile_a.shape[0],
+                tile_b.shape[1],
+            )
+        else:  # [M,K] x [N,K]
+            if tile_a.shape[1] != tile_b.shape[1]:
+                raise ValueError("Incompatible shapes for matrix multiplication.")
+
+            # The resulting shape will be (tile_a.shape[:-1], tile_b.shape[-1])
+            result_shape = (
+                tile_a.shape[0],
+                tile_b.shape[0],
+            )
 
         return Tile(
             dtype=tile_a.dtype, shape=result_shape

@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from typing import List, Tuple
 from step_py.ops import *
+from step_py.functions import map_fn
 from proto import datatype_pb2, func_pb2, graph_pb2, ops_pb2
 from step_py.datatype import ElementTP, Float32
 import numpy as np
@@ -32,6 +33,19 @@ def simulate(
 
 
 # pylint: disable=no-member
+def to_pb_elem_to_elem_func(op_fn: map_fn.MapFn) -> func_pb2.ElemtoElemFunc:
+    func_pb = func_pb2.ElemtoElemFunc()
+    if isinstance(op_fn, map_fn.Matmul):
+        map_fn_pb = func_pb2.Matmul()
+        map_fn_pb.weight_transposed = op_fn.weight_transposed
+        func_pb.matmul.CopyFrom(map_fn_pb)
+    else:
+        raise NotImplementedError(
+            f"Function {op_fn} is not implemented for serialization."
+        )
+    return func_pb
+
+
 def to_pb_datatype(dtype: ElementTP) -> datatype_pb2.DataType:
     if isinstance(dtype, Float32):
         dtype_pb = datatype_pb2.DataType()
@@ -118,8 +132,16 @@ def serialize(graph: MultiDiGraph, protobuf_file: str):
                 binarymap_pb.input_id2 = op.in2.instance_id
 
             func_pb = func_pb2.ElemtoElemFunc()
-            func_pb.matmul.CopyFrom(func_pb2.Matmul())
-            binarymap_pb.func.CopyFrom(func_pb)
+            if isinstance(op.fn, map_fn.Matmul):
+                map_fn_pb = func_pb2.Matmul()
+                map_fn_pb.weight_transpose = op.fn.weight_transposed
+                func_pb.matmul.CopyFrom(map_fn_pb)
+            else:
+                raise NotImplementedError(
+                    f"Function {op.fn} is not implemented for serialization."
+                )
+
+            binarymap_pb.func.CopyFrom(to_pb_elem_to_elem_func(op.fn))
 
             binarymap_pb.compute_bw = op.compute_bw
             binarymap_pb.write_back_mu = op.write_back_mu
@@ -127,6 +149,39 @@ def serialize(graph: MultiDiGraph, protobuf_file: str):
             binarymap_pb.dtype_b.CopyFrom(to_pb_datatype(op.stream.dtype.dtype))
 
             operator.binarymap.CopyFrom(binarymap_pb)
+        elif isinstance(op, BinaryMapAccum):
+            binarymapaccum_pb = ops_pb2.BinaryMapAccum()
+
+            if isinstance(op.in1, Tuple):
+                input_node, idx = op.in1
+                binarymapaccum_pb.stream_idx1 = idx
+                binarymapaccum_pb.input_id1 = input_node.instance_id
+                binarymapaccum_pb.dtype_a.CopyFrom(
+                    to_pb_datatype(input_node.stream_idx(idx).dtype.dtype)
+                )
+            else:
+                binarymapaccum_pb.input_id1 = op.in1.instance_id
+                binarymapaccum_pb.dtype_a.CopyFrom(
+                    to_pb_datatype(op.in1.stream.dtype.dtype)
+                )
+
+            if isinstance(op.in2, Tuple):
+                input_node, idx = op.in2
+                binarymapaccum_pb.stream_idx2 = idx
+                binarymapaccum_pb.input_id2 = input_node.instance_id
+            else:
+                binarymapaccum_pb.input_id2 = op.in2.instance_id
+
+            binarymapaccum_pb.func.CopyFrom(to_pb_elem_to_elem_func(op.fn))
+            binarymapaccum_pb.tile_row = op.accum_tile_row
+            binarymapaccum_pb.tile_col = op.accum_tile_col
+            binarymapaccum_pb.rank = op.rank
+            binarymapaccum_pb.compute_bw = op.compute_bw
+            binarymapaccum_pb.write_back_mu = op.write_back_mu
+
+            binarymapaccum_pb.dtype_b.CopyFrom(to_pb_datatype(op.stream.dtype.dtype))
+
+            operator.binarymap_accum.CopyFrom(binarymapaccum_pb)
         elif isinstance(op, RepeatStatic):
             repeatstatic_pb = ops_pb2.RepeatStatic()
 
@@ -207,6 +262,23 @@ def serialize(graph: MultiDiGraph, protobuf_file: str):
             promote_pb.dtype.CopyFrom(to_pb_datatype(op.stream.dtype.dtype))
 
             operator.promote.CopyFrom(promote_pb)
+        elif isinstance(op, PrinterContext):
+            printercontext_pb = ops_pb2.PrinterContext()
+
+            if isinstance(op.input, Tuple):
+                input_node, idx = op.input
+                printercontext_pb.stream_idx = idx
+                printercontext_pb.input_id = input_node.instance_id
+                printercontext_pb.dtype.CopyFrom(
+                    to_pb_datatype(input_node.stream_idx(idx).dtype.dtype)
+                )
+            else:
+                printercontext_pb.input_id = op.input.instance_id
+                printercontext_pb.dtype.CopyFrom(
+                    to_pb_datatype(op.input.stream.dtype.dtype)
+                )
+
+            operator.printer_context.CopyFrom(printercontext_pb)
         else:
             raise ValueError(f"Unsupported operation type: {type(op)}")
 

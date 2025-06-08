@@ -61,3 +61,5 @@ def check_gold_tensor(sim_out_path, gold: torch.Tensor):
         print("Congratulations! Test passed!")
     except AssertionError as e:
         print("Mismatch found:", e)
+        print("Output tensor:", out_sim)
+        print("Gold tensor:", gold.numpy())

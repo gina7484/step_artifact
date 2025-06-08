@@ -47,7 +47,7 @@ def save_graph_format(
         n.attr["fillcolor"] = (
             class_color_map[class_name] if class_name in class_color_map else "white"
         )  # Set background color
-        if class_name == "OffChipStore":
+        if class_name in ["OffChipStore", "PrinterContext"]:
             n.attr["label"] = str(node_id)
         elif class_name in ["Broadcast", "FlatPartition", "Parallelize"]:
             n.attr["label"] = "\n".join(

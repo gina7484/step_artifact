@@ -18,7 +18,7 @@ weight = model.weight.T.detach().clone().contiguous()
 gold = torch.matmul(input, weight)
 
 
-# ================ Generating Tiling Schedule ================
+# ================ Generating Tiling Schedule (TileMN) ================
 tile_m_gen_q = 16
 tile_k_gen_q = H
 tile_n_gen_q = 32
@@ -107,7 +107,7 @@ simulate(
     step_graph,
     False,  # logging
     HBMConfig(64, 8, 2, 2, 1, 14),
-    "/scratch/zgh23/step_tl/graph.pb"
+    "/scratch/zgh23/step_tl/graph.pb",
 )
 
 check_gold_tensor(
