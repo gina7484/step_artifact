@@ -17,7 +17,9 @@ class HBMConfig:
     per_channel_start_up_time: int
 
 
-def simulate(graph: List[StepOps], logging: bool, hbm_config: HBMConfig, protobuf_file: str):
+def simulate(
+    graph: List[StepOps], logging: bool, hbm_config: HBMConfig, protobuf_file: str
+):
 
     serialize(graph, protobuf_file)
 
@@ -161,21 +163,28 @@ def serialize(graph: MultiDiGraph, protobuf_file: str):
                 input_node, idx = op.input
                 flatpartition_pb.input_stream_idx = idx
                 flatpartition_pb.input_id = input_node.instance_id
-                flatpartition_pb.input_dtype.CopyFrom(to_pb_datatype(input_node.stream_idx(idx).dtype.dtype))
+                flatpartition_pb.input_dtype.CopyFrom(
+                    to_pb_datatype(input_node.stream_idx(idx).dtype.dtype)
+                )
             else:
                 flatpartition_pb.input_id = op.input.instance_id
-                flatpartition_pb.input_dtype.CopyFrom(to_pb_datatype(op.input.stream.dtype.dtype))
-
+                flatpartition_pb.input_dtype.CopyFrom(
+                    to_pb_datatype(op.input.stream.dtype.dtype)
+                )
 
             if isinstance(op.control, Tuple):
                 control_node, idx = op.control
                 flatpartition_pb.control_stream_idx = idx
                 flatpartition_pb.control_id = control_node.instance_id
-                flatpartition_pb.control_dtype.CopyFrom(to_pb_datatype(control_node.stream_idx(idx).dtype.dtype))
+                flatpartition_pb.control_dtype.CopyFrom(
+                    to_pb_datatype(control_node.stream_idx(idx).dtype.dtype)
+                )
 
             else:
                 flatpartition_pb.control_id = op.control.instance_id
-                flatpartition_pb.control_dtype.CopyFrom(to_pb_datatype(op.control.stream.dtype.dtype))
+                flatpartition_pb.control_dtype.CopyFrom(
+                    to_pb_datatype(op.control.stream.dtype.dtype)
+                )
 
             flatpartition_pb.partition_rank = op.partition_rank
             flatpartition_pb.num_consumers = op.num_consumers
@@ -183,6 +192,21 @@ def serialize(graph: MultiDiGraph, protobuf_file: str):
             flatpartition_pb.write_back_mu = op.write_back_mu
 
             operator.flat_partition.CopyFrom(flatpartition_pb)
+        elif isinstance(op, Promote):
+            promote_pb = ops_pb2.Promote()
+
+            promote_pb.input_id = op.input.instance_id
+            if isinstance(op.input, Tuple):
+                input_node, idx = op.input
+                promote_pb.stream_idx = idx
+                promote_pb.input_id = input_node.instance_id
+            else:
+                promote_pb.input_id = op.input.instance_id
+
+            promote_pb.promote_rank = op.promote_rank
+            promote_pb.dtype.CopyFrom(to_pb_datatype(op.stream.dtype.dtype))
+
+            operator.promote.CopyFrom(promote_pb)
         else:
             raise ValueError(f"Unsupported operation type: {type(op)}")
 

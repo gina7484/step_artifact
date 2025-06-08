@@ -220,6 +220,68 @@ class RepeatStatic(StepOps):
         self.input = new_input
 
 
+class Promote(StepOps):
+    _input: Union[StepOps, Tuple[StepOps, int]]
+    promote_rank: int
+    _stream: Stream
+
+    def __init__(
+        self,
+        graph: MultiDiGraph,
+        input: Union[StepOps, Tuple[StepOps, int]],
+        promote_rank: int,
+    ):
+        super().__init__()
+        self._input = input
+        self.promote_rank = promote_rank
+
+        input_stream: Stream = get_stream(input)
+        stream_shape = list(input_stream.shape)
+        stream_shape.insert(len(input_stream.shape) - promote_rank, 1)
+        self._stream = Stream(
+            dtype=input_stream.dtype,
+            shape=tuple(stream_shape),
+        )
+
+        input_node = input if isinstance(input, StepOps) else input[0]
+        graph.add_edge(input_node, self)
+
+    @property
+    def stream(self) -> Stream:
+        """The stream of the operation."""
+        return self._stream
+
+    @property
+    def stream_list(self) -> List[Stream]:
+        return [self._stream]
+
+    @property
+    def input(self) -> Union["StepOps", Tuple["StepOps", int]]:
+        return self._input
+
+    @property
+    def input_list(self) -> List[Union["StepOps", Tuple["StepOps", int]]]:
+        return [self._input]
+
+    def stream_idx(self, idx: int) -> Stream:
+        raise NotImplementedError(
+            "Shouldn't be called for nodes that only have a single output stream"
+        )
+
+    def __str__(self):
+        cls = self.__class__.__name__
+        return f"{cls}_{self.instance_id}"
+
+    def replace_input(
+        self,
+        org_input: Union["StepOps", Tuple["StepOps", int]],
+        new_input: Union["StepOps", Tuple["StepOps", int]],
+    ):
+        if get_stream(self.input) != get_stream(new_input):
+            raise ValueError("The shape of the input stream shouldn't change")
+        self.input = new_input
+
+
 class BinaryMap(StepOps):
     in1: Union[StepOps, Tuple[StepOps, int]]
     in2: Union[StepOps, Tuple[StepOps, int]]
@@ -257,7 +319,7 @@ class BinaryMap(StepOps):
             dtype=self.fn.apply((in1_stream.dtype, in2_stream.dtype)),
             shape=self.in1.stream.shape,
         )
-        
+
         input_node1 = in1 if isinstance(in1, StepOps) else in1[0]
         input_node2 = in2 if isinstance(in2, StepOps) else in2[0]
 
@@ -467,7 +529,11 @@ class FlatPartition(StepOps):
         control_stream: Stream = get_stream(control)
         new_names = sympy.symbols(f"{str(self)}_0:{num_consumers}")
         self._stream = [
-            Stream(dtype=in_stream.dtype, shape=[new_names[i]] + in_stream.shape[-partition_rank:]) for i in range(num_consumers)
+            Stream(
+                dtype=in_stream.dtype,
+                shape=[new_names[i]] + in_stream.shape[-partition_rank:],
+            )
+            for i in range(num_consumers)
         ]
 
         input_node = input if isinstance(input, StepOps) else input[0]
@@ -515,5 +581,3 @@ class FlatPartition(StepOps):
             self.control = new_input
         else:
             raise ValueError("Wrong org_input")
-
-
