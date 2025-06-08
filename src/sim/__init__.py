@@ -149,6 +149,63 @@ def serialize(graph: MultiDiGraph, protobuf_file: str):
             binarymap_pb.dtype_b.CopyFrom(to_pb_datatype(op.stream.dtype.dtype))
 
             operator.binarymap.CopyFrom(binarymap_pb)
+        elif isinstance(op, Bufferize):
+            bufferize_pb = ops_pb2.Bufferize()
+
+            if isinstance(op.input, Tuple):
+                input_node, idx = op.input
+                bufferize_pb.stream_idx = idx
+                bufferize_pb.input_id = input_node.instance_id
+            else:
+                bufferize_pb.input_id = op.input.instance_id
+
+            bufferize_pb.rank = op.rank
+            bufferize_pb.dtype.CopyFrom(to_pb_datatype(op.stream.dtype.dtype.dtype))
+
+            operator.bufferize.CopyFrom(bufferize_pb)
+        elif isinstance(op, Streamify):
+            streamify_pb = ops_pb2.Streamify()
+
+            if isinstance(op.input, Tuple):
+                input_node, idx = op.input
+                streamify_pb.stream_idx = idx
+                streamify_pb.input_id = input_node.instance_id
+            else:
+                streamify_pb.input_id = op.input.instance_id
+
+            streamify_pb.repeat_factor.extend(list(op.repeat_factor))
+            streamify_pb.rank = op.rank
+            streamify_pb.dtype.CopyFrom(to_pb_datatype(op.stream.dtype.dtype))
+
+            operator.streamify.CopyFrom(streamify_pb)
+        elif isinstance(op, DynStreamify):
+            dynstreamify_pb = ops_pb2.DynStreamify()
+
+            if isinstance(op.input, Tuple):
+                input_node, idx = op.input
+                dynstreamify_pb.input_stream_idx = idx
+                dynstreamify_pb.input_id = input_node.instance_id
+            else:
+                dynstreamify_pb.input_id = op.input.instance_id
+
+            if isinstance(op.ref, Tuple):
+                ref_node, idx = op.ref
+                dynstreamify_pb.ref_stream_idx = idx
+                dynstreamify_pb.ref_id = ref_node.instance_id
+                dynstreamify_pb.ref_dtype.CopyFrom(
+                    to_pb_datatype(ref_node.stream_idx(idx).dtype.dtype)
+                )
+            else:
+                dynstreamify_pb.ref_id = op.ref.instance_id
+                dynstreamify_pb.ref_dtype.CopyFrom(
+                    to_pb_datatype(op.ref.stream.dtype.dtype)
+                )
+
+            dynstreamify_pb.bufferized_rank = op.bufferized_rank
+            dynstreamify_pb.repeat_rank = op.repeat_rank
+            dynstreamify_pb.input_dtype.CopyFrom(to_pb_datatype(op.stream.dtype.dtype))
+
+            operator.dyn_streamify.CopyFrom(dynstreamify_pb)
         elif isinstance(op, BinaryMapAccum):
             binarymapaccum_pb = ops_pb2.BinaryMapAccum()
 

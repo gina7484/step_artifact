@@ -24,8 +24,18 @@ class Tile:
 
 
 @dataclass
-class Stream:
+class Buffer:
     dtype: Tile
+    shape: Tuple[int, ...]
+
+    @property
+    def rank(self) -> int:
+        return len(self.shape)
+
+
+@dataclass
+class Stream:
+    dtype: Union[Tile, Buffer]
     shape: Tuple[Union[int, DynDim], ...]
 
     @property

@@ -50,7 +50,7 @@ def check_gold_npy(sim_out_path, gold_path):
         print("Mismatch found:", e)
 
 
-def check_gold_tensor(sim_out_path, gold: torch.Tensor):
+def check_gold_tensor(sim_out_path, gold: torch.Tensor) -> bool:
     out_sim = reconstruct_numpy(sim_out_path, delete_npy=False)
     print("Output shape:", out_sim.shape)
     print("Gold shape:", gold.shape)
@@ -59,7 +59,9 @@ def check_gold_tensor(sim_out_path, gold: torch.Tensor):
             gold, torch.from_numpy(out_sim), rtol=1e-4, atol=1e-6
         )
         print("Congratulations! Test passed!")
+        return True
     except AssertionError as e:
         print("Mismatch found:", e)
         print("Output tensor:", out_sim)
         print("Gold tensor:", gold.numpy())
+        return False

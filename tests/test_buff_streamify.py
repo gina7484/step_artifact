@@ -1,5 +1,4 @@
 import torch
-from step_py.kernels.linear import Linear, LinearTileConfig
 from step_py.ops import *
 from step_py.functions import map_fn
 from sim import simulate, HBMConfig
@@ -10,37 +9,37 @@ from rewrite.broadcast import infer_broadcast
 from networkx import MultiDiGraph, drawing
 
 
-def test_linear_mk():
+def test_buff_streamify():
     # ================ Setting up the model and data ================
     M = 32
-    N = 64
     K = 48
 
-    model = torch.nn.Linear(K, N, bias=False)
+    tile_M = 16
+    tile_K = 16
+
     input = torch.randn(M, K)
-    # input = torch.ones(M, K, dtype=torch.float32)
-    weight = model.weight.T.detach().clone().contiguous()  # [K,N]
-    gold = model(input)
-    # weight = torch.ones(K, N, dtype=torch.float32)  # [K,N]
-    # gold = torch.matmul(input, weight)  # [M,N]
+    gold = input
 
     # # ================ STeP Program ================
 
     step_graph: MultiDiGraph = MultiDiGraph()
 
-    linear = Linear(
-        step_graph=step_graph,
-        input=input,
-        weight=weight,
-        tile_config=LinearTileConfig(m=16, k=16, n=N),
-        comp_bw=1024,
-        write_back_mu=True,
+    load = OffChipLoad(
+        underlying=input,
+        stride=(K // tile_K, 1),
+        out_shape_tiled=(M // tile_M, K // tile_K),
+        tile_row=tile_M,
+        tile_col=tile_K,
         par_dispatch=4,
     )
 
+    buff = Bufferize(step_graph, load, 1)
+
+    streamify = Streamify(step_graph, buff, [], 1)
+
     output = OffChipStore(
         graph=step_graph,
-        input=linear,
+        input=streamify,
         par_dispatch=4,
         store_file_name="output",
     )
@@ -54,7 +53,7 @@ def test_linear_mk():
     step_graph = infer_broadcast(step_graph)
 
     # ================ Print the STeP Graph ================
-    OUTPUT_FILENAME = "linear_tile_mn_step"
+    OUTPUT_FILENAME = "buff_streamify_step"
     save_graph_format(step_graph, OUTPUT_FILENAME, ["png"])
 
     # ================ Simulate & Check the output ================
@@ -67,3 +66,6 @@ def test_linear_mk():
 
     check_gold_tensor("output", gold)
 
+
+def test_buff_dyn_streamify():
+    pass
