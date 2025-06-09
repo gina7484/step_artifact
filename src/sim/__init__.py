@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from typing import List, Tuple
 from step_py.ops import *
+from step_py.utility_ops import *
 from step_py.functions import map_fn
 from proto import datatype_pb2, func_pb2, graph_pb2, ops_pb2
 from step_py.datatype import ElementTP, Float32
@@ -104,10 +105,10 @@ def serialize(graph: MultiDiGraph, protobuf_file: str):
 
             offchipload_pb.dtype.CopyFrom(to_pb_datatype(op.stream.dtype.dtype))
 
-            file_path = f"{str(op)}"
+            file_path = f"{str(op)}.npy"
             np.save(file_path, op.underlying.detach().numpy())
-            offchipload_pb.npy_path = file_path + ".npy"
-            print(f"Saved {str(op)} data to {file_path+ ".npy"}")
+            offchipload_pb.npy_path = file_path
+            print(f"Saved {str(op)} data to {file_path}")
 
             operator.off_chip_load.CopyFrom(offchipload_pb)
         elif isinstance(op, BinaryMap):
@@ -319,6 +320,17 @@ def serialize(graph: MultiDiGraph, protobuf_file: str):
             promote_pb.dtype.CopyFrom(to_pb_datatype(op.stream.dtype.dtype))
 
             operator.promote.CopyFrom(promote_pb)
+        elif isinstance(op, SelectGen):
+            selectgen_pb = ops_pb2.SelectGen()
+
+            selectgen_pb.is_multihot = op.is_multihot
+
+            file_path = f"{str(op)}.npy"
+            selectgen_pb.npy_path = file_path
+            np.save(file_path, op.underlying.detach().numpy())
+            print(f"Saved {str(op)} data to {file_path}")
+
+            operator.select_gen.CopyFrom(selectgen_pb)
         elif isinstance(op, PrinterContext):
             printercontext_pb = ops_pb2.PrinterContext()
 
@@ -326,14 +338,34 @@ def serialize(graph: MultiDiGraph, protobuf_file: str):
                 input_node, idx = op.input
                 printercontext_pb.stream_idx = idx
                 printercontext_pb.input_id = input_node.instance_id
-                printercontext_pb.dtype.CopyFrom(
-                    to_pb_datatype(input_node.stream_idx(idx).dtype.dtype)
-                )
+                if isinstance(input_node.stream_idx(idx).dtype, MultiHot):
+                    dtype_pb = datatype_pb2.DataType()
+                    dtype_pb.multi_hot.CopyFrom(datatype_pb2.MultiHot())
+                    printercontext_pb.dtype.CopyFrom(dtype_pb)
+                elif isinstance(input_node.stream_idx(idx).dtype, Tile):
+                    printercontext_pb.dtype.CopyFrom(
+                        to_pb_datatype(input_node.stream_idx(idx).dtype.dtype)
+                    )
+                else:
+                    raise ValueError(
+                        f"Unsupported datatype({input_node.stream_idx(idx).dtype}) for PrinterContext"
+                    )
+
             else:
                 printercontext_pb.input_id = op.input.instance_id
-                printercontext_pb.dtype.CopyFrom(
-                    to_pb_datatype(op.input.stream.dtype.dtype)
-                )
+
+                if isinstance(op.input.stream.dtype, MultiHot):
+                    dtype_pb = datatype_pb2.DataType()
+                    dtype_pb.multi_hot.CopyFrom(datatype_pb2.MultiHot())
+                    printercontext_pb.dtype.CopyFrom(dtype_pb)
+                elif isinstance(op.input.stream.dtype, Tile):
+                    printercontext_pb.dtype.CopyFrom(
+                        to_pb_datatype(op.input.stream.dtype.dtype)
+                    )
+                else:
+                    raise ValueError(
+                        f"Unsupported datatype({op.input.stream.dtype}) for PrinterContext"
+                    )
 
             operator.printer_context.CopyFrom(printercontext_pb)
         else:

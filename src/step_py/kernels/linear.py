@@ -8,6 +8,7 @@ import torch
 from step_py.datatype import Stream
 from step_py.functions import map_fn
 from step_py.ops import *
+from step_py.utility_ops import *
 
 
 @dataclass

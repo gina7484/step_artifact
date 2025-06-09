@@ -33,6 +33,14 @@ class Buffer:
         return len(self.shape)
 
 
+class MultiHot:
+    pass
+
+
+class IndexN:
+    pass
+
+
 @dataclass
 class Stream:
     dtype: Union[Tile, Buffer]

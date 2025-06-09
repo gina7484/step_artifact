@@ -1,6 +1,7 @@
 import torch
 from step_py.kernels.linear import Linear, LinearTileConfig
 from step_py.ops import *
+from step_py.utility_ops import *
 from step_py.functions import map_fn
 from sim import simulate, HBMConfig
 from utils.shape_checking import is_valid_view
@@ -42,7 +43,7 @@ def test_linear_mk_offchip():
         graph=step_graph,
         input=linear,
         par_dispatch=4,
-        store_file_name="output",
+        store_file_name="output",  # This should not include the file extension!!
     )
 
     # ================ Check whether the shapes match ================
