@@ -56,17 +56,17 @@ def Linear(
             input_tensor_shape[-2] // tile_config.m,
         )
 
-        print(f"Input shape: {formatted_input.stream.shape}")
     elif isinstance(input, (StepOps, Tuple)):
+        outer_dims = get_stream(input).shape[:-1]
         if N == tile_config.n:  # TileM / TileMK (Not tiling N)
             formatted_input = Promote(graph=step_graph, input=input, promote_rank=1)
         else:  # TileMN / TileMNK (N is tiled)
-            """
-            Bufferize 1D
-            Streamify with Repeat 1D
-            """
-            pass
-
+            buff_rank = 1
+            buff = Bufferize(step_graph, input, buff_rank)
+            formatted_input = Streamify(
+                step_graph, buff, [N // tile_config.n], buff_rank
+            )
+            printer = PrinterContext(step_graph, formatted_input)
     # ================= Load weight =================
     formatted_weight = OffChipLoad(
         underlying=weight,

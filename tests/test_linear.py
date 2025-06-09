@@ -10,7 +10,7 @@ from rewrite.broadcast import infer_broadcast
 from networkx import MultiDiGraph, drawing
 
 
-def test_linear_mk():
+def test_linear_mk_offchip():
     # ================ Setting up the model and data ================
     M = 32
     N = 64
@@ -54,7 +54,7 @@ def test_linear_mk():
     step_graph = infer_broadcast(step_graph)
 
     # ================ Print the STeP Graph ================
-    OUTPUT_FILENAME = "linear_tile_mn_step"
+    OUTPUT_FILENAME = "linear_tile_mk_step"
     save_graph_format(step_graph, OUTPUT_FILENAME, ["png"])
 
     # ================ Simulate & Check the output ================
@@ -67,3 +67,309 @@ def test_linear_mk():
 
     check_gold_tensor("output", gold)
 
+
+def test_linear_mk_onchip():
+    # ================ Setting up the model and data ================
+    M = 32
+    N = 64
+    K = 48
+
+    model = torch.nn.Linear(K, N, bias=False)
+    input = torch.randn(M, K)
+    weight = model.weight.T.detach().clone().contiguous()  # [K,N]
+    gold = model(input)
+
+    # # ================ STeP Program ================
+
+    step_graph: MultiDiGraph = MultiDiGraph()
+    linear_tile_config = LinearTileConfig(m=16, k=16, n=N)
+
+    load_input = OffChipLoad(
+        underlying=input,
+        stride=(K // linear_tile_config.k, 1),
+        out_shape_tiled=(M // linear_tile_config.m, K // linear_tile_config.k),
+        tile_row=linear_tile_config.m,
+        tile_col=linear_tile_config.k,
+        par_dispatch=4,
+    )
+
+    linear = Linear(
+        step_graph=step_graph,
+        input=load_input,
+        weight=weight,
+        tile_config=linear_tile_config,
+        comp_bw=1024,
+        write_back_mu=True,
+        par_dispatch=4,
+    )
+
+    output = OffChipStore(
+        graph=step_graph,
+        input=linear,
+        par_dispatch=4,
+        store_file_name="output",
+    )
+
+    # ================ Check whether the shapes match ================
+
+    print(f"Gold shape: {gold.shape}")
+    print(f"Output shape: {output.get_untiled_shape()}")
+
+    # ================ Rewrite passes ================
+    step_graph = infer_broadcast(step_graph)
+
+    # ================ Print the STeP Graph ================
+    OUTPUT_FILENAME = "linear_tile_mk_onchip_step"
+    save_graph_format(step_graph, OUTPUT_FILENAME, ["png"])
+
+    # ================ Simulate & Check the output ================
+    simulate(
+        step_graph,
+        False,  # logging
+        HBMConfig(64, 8, 2, 2, 1, 14),
+        "/home/ginasohn/step_tl/graph.pb",
+    )
+
+    check_gold_tensor("output", gold)
+
+
+def test_linear_mn_offchip():
+    # ================ Setting up the model and data ================
+    M = 32
+    N = 64
+    K = 48
+
+    model = torch.nn.Linear(K, N, bias=False)
+    input = torch.randn(M, K)
+    weight = model.weight.T.detach().clone().contiguous()  # [K,N]
+    gold = model(input)
+
+    # # ================ STeP Program ================
+
+    step_graph: MultiDiGraph = MultiDiGraph()
+
+    linear = Linear(
+        step_graph=step_graph,
+        input=input,
+        weight=weight,
+        tile_config=LinearTileConfig(m=16, k=K, n=16),
+        comp_bw=1024,
+        write_back_mu=True,
+        par_dispatch=4,
+    )
+
+    output = OffChipStore(
+        graph=step_graph,
+        input=linear,
+        par_dispatch=4,
+        store_file_name="output",
+    )
+
+    # ================ Check whether the shapes match ================
+
+    print(f"Gold shape: {gold.shape}")
+    print(f"Output shape: {output.get_untiled_shape()}")
+
+    # ================ Rewrite passes ================
+    step_graph = infer_broadcast(step_graph)
+
+    # ================ Print the STeP Graph ================
+    OUTPUT_FILENAME = "linear_tile_mn_off_chip"
+    save_graph_format(step_graph, OUTPUT_FILENAME, ["png"])
+
+    # ================ Simulate & Check the output ================
+    simulate(
+        step_graph,
+        False,  # logging
+        HBMConfig(64, 8, 2, 2, 1, 14),
+        "/home/ginasohn/step_tl/graph.pb",
+    )
+
+    check_gold_tensor("output", gold)
+
+
+def test_linear_mn_onchip():
+    # ================ Setting up the model and data ================
+    M = 32
+    N = 64
+    K = 48
+
+    model = torch.nn.Linear(K, N, bias=False)
+    input = torch.randn(M, K)
+    weight = model.weight.T.detach().clone().contiguous()  # [K,N]
+    gold = model(input)
+
+    # # ================ STeP Program ================
+
+    step_graph: MultiDiGraph = MultiDiGraph()
+    linear_tile_config = LinearTileConfig(m=16, k=K, n=16)
+
+    load_input = OffChipLoad(
+        underlying=input,
+        stride=(K // linear_tile_config.k, 1),
+        out_shape_tiled=(M // linear_tile_config.m, K // linear_tile_config.k),
+        tile_row=linear_tile_config.m,
+        tile_col=linear_tile_config.k,
+        par_dispatch=4,
+    )
+
+    printer = PrinterContext(step_graph, load_input)
+
+    linear = Linear(
+        step_graph=step_graph,
+        input=load_input,
+        weight=weight,
+        tile_config=linear_tile_config,
+        comp_bw=1024,
+        write_back_mu=True,
+        par_dispatch=4,
+    )
+
+    output = OffChipStore(
+        graph=step_graph,
+        input=linear,
+        par_dispatch=4,
+        store_file_name="output",
+    )
+
+    # ================ Check whether the shapes match ================
+
+    print(f"Gold shape: {gold.shape}")
+    print(f"Output shape: {output.get_untiled_shape()}")
+
+    # ================ Rewrite passes ================
+    step_graph = infer_broadcast(step_graph)
+
+    # ================ Print the STeP Graph ================
+    OUTPUT_FILENAME = "linear_tile_mn_onchip_step"
+    save_graph_format(step_graph, OUTPUT_FILENAME, ["png"])
+
+    # ================ Simulate & Check the output ================
+    simulate(
+        step_graph,
+        False,  # logging
+        HBMConfig(64, 8, 2, 2, 1, 14),
+        "/home/ginasohn/step_tl/graph.pb",
+    )
+
+    check_gold_tensor("output", gold)
+
+
+def test_linear_mnk_offchip():
+    # ================ Setting up the model and data ================
+    M = 32
+    N = 64
+    K = 48
+
+    model = torch.nn.Linear(K, N, bias=False)
+    input = torch.randn(M, K)
+    weight = model.weight.T.detach().clone().contiguous()  # [K,N]
+    gold = model(input)
+
+    # # ================ STeP Program ================
+
+    step_graph: MultiDiGraph = MultiDiGraph()
+
+    linear = Linear(
+        step_graph=step_graph,
+        input=input,
+        weight=weight,
+        tile_config=LinearTileConfig(m=16, k=16, n=16),
+        comp_bw=1024,
+        write_back_mu=True,
+        par_dispatch=4,
+    )
+
+    output = OffChipStore(
+        graph=step_graph,
+        input=linear,
+        par_dispatch=4,
+        store_file_name="output",
+    )
+
+    # ================ Check whether the shapes match ================
+
+    print(f"Gold shape: {gold.shape}")
+    print(f"Output shape: {output.get_untiled_shape()}")
+
+    # ================ Rewrite passes ================
+    step_graph = infer_broadcast(step_graph)
+
+    # ================ Print the STeP Graph ================
+    OUTPUT_FILENAME = "linear_tile_mnk_off_chip"
+    save_graph_format(step_graph, OUTPUT_FILENAME, ["png"])
+
+    # ================ Simulate & Check the output ================
+    simulate(
+        step_graph,
+        False,  # logging
+        HBMConfig(64, 8, 2, 2, 1, 14),
+        "/home/ginasohn/step_tl/graph.pb",
+    )
+
+    check_gold_tensor("output", gold)
+
+
+def test_linear_mnk_onchip():
+    # ================ Setting up the model and data ================
+    M = 32
+    N = 64
+    K = 48
+
+    model = torch.nn.Linear(K, N, bias=False)
+    input = torch.randn(M, K)
+    weight = model.weight.T.detach().clone().contiguous()  # [K,N]
+    gold = model(input)
+
+    # # ================ STeP Program ================
+
+    step_graph: MultiDiGraph = MultiDiGraph()
+    linear_tile_config = LinearTileConfig(m=16, k=16, n=16)
+
+    load_input = OffChipLoad(
+        underlying=input,
+        stride=(K // linear_tile_config.k, 1),
+        out_shape_tiled=(M // linear_tile_config.m, K // linear_tile_config.k),
+        tile_row=linear_tile_config.m,
+        tile_col=linear_tile_config.k,
+        par_dispatch=4,
+    )
+
+    linear = Linear(
+        step_graph=step_graph,
+        input=load_input,
+        weight=weight,
+        tile_config=linear_tile_config,
+        comp_bw=1024,
+        write_back_mu=True,
+        par_dispatch=4,
+    )
+
+    output = OffChipStore(
+        graph=step_graph,
+        input=linear,
+        par_dispatch=4,
+        store_file_name="output",
+    )
+
+    # ================ Check whether the shapes match ================
+
+    print(f"Gold shape: {gold.shape}")
+    print(f"Output shape: {output.get_untiled_shape()}")
+
+    # ================ Rewrite passes ================
+    step_graph = infer_broadcast(step_graph)
+
+    # ================ Print the STeP Graph ================
+    OUTPUT_FILENAME = "linear_tile_mnk_on_chip"
+    save_graph_format(step_graph, OUTPUT_FILENAME, ["png"])
+
+    # ================ Simulate & Check the output ================
+    simulate(
+        step_graph,
+        False,  # logging
+        HBMConfig(64, 8, 2, 2, 1, 14),
+        "/home/ginasohn/step_tl/graph.pb",
+    )
+
+    check_gold_tensor("output", gold)

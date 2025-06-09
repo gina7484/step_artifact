@@ -218,7 +218,7 @@ class RepeatStatic(StepOps):
     ):
         if get_stream(self.input) != get_stream(new_input):
             raise ValueError("The shape of the input stream shouldn't change")
-        self.input = new_input
+        self._input = new_input
 
 
 class Promote(StepOps):
@@ -280,7 +280,7 @@ class Promote(StepOps):
     ):
         if get_stream(self.input) != get_stream(new_input):
             raise ValueError("The shape of the input stream shouldn't change")
-        self.input = new_input
+        self._input = new_input
 
 
 class BinaryMap(StepOps):
@@ -521,7 +521,7 @@ class Broadcast(StepOps):
     ):
         if get_stream(self.input) != get_stream(new_input):
             raise ValueError("The shape of the input stream shouldn't change")
-        self.input = new_input
+        self._input = new_input
 
 
 class PrinterContext(StepOps):
@@ -700,7 +700,7 @@ class Bufferize(StepOps):
     ):
         if get_stream(self.input) != get_stream(new_input):
             raise ValueError("The shape of the input stream shouldn't change")
-        self.input = new_input
+        self._input = new_input
 
 
 class Streamify(StepOps):
@@ -770,7 +770,7 @@ class Streamify(StepOps):
     ):
         if get_stream(self.input) != get_stream(new_input):
             raise ValueError("The shape of the input stream shouldn't change")
-        self.input = new_input
+        self._input = new_input
 
 
 class DynStreamify(StepOps):
@@ -937,7 +937,7 @@ class FlatPartition(StepOps):
         if self.input == org_input:
             if get_stream(self.input) != get_stream(new_input):
                 raise ValueError("The shape of the input stream shouldn't change")
-            self.input = new_input
+            self._input = new_input
         elif self.control == org_input:
             if get_stream(self.control) != get_stream(new_input):
                 raise ValueError("The shape of the input stream shouldn't change")
