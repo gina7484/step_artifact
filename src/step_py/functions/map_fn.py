@@ -23,6 +23,7 @@ class Matmul(MapFn):
     If `weight_transposed` is False, the tile shapes should be [M,K], [K,N]
     """
 
+    # [Genghan] We need output dtype?
     weight_transposed: bool
 
     def __init__(self, weight_transposed: bool = False):
@@ -87,3 +88,96 @@ class SelectMul(MapFn):
         return Tile(
             dtype=tile_2d.dtype, shape=result_shape
         )
+    
+class Mul(MapFn):
+    """
+    A function that performs element-wise multiplication.
+    """
+
+    def __init__(self):
+        super().__init__()
+
+    def apply(self, input_tp: Tuple) -> Tile:
+        if len(input_tp) != 2:
+            raise ValueError("Mul requires exactly two input types.")
+
+        tile_a, tile_b = input_tp[0], input_tp[1]
+
+        if not (isinstance(tile_a, Tile) and isinstance(tile_b, Tile)):
+            raise TypeError("Both inputs to Mul must be of type Tile.")
+
+        # Check if the shapes are broadcastable for element-wise multiplication
+        tile_a_0, tile_a_1 = tile_a.shape
+        tile_b_0, tile_b_1 = tile_b.shape
+
+        # Check broadcastability for dimension 0
+        if not ((tile_a_0 == tile_b_0) or (tile_a_0 == 1) or (tile_b_0 == 1)):
+            raise ValueError(f"Shapes are not broadcastable: {tile_a.shape} and {tile_b.shape}")
+        
+        # Check broadcastability for dimension 1  
+        if not ((tile_a_1 == tile_b_1) or (tile_a_1 == 1) or (tile_b_1 == 1)):
+            raise ValueError(f"Shapes are not broadcastable: {tile_a.shape} and {tile_b.shape}")
+        
+        # Calculate the output shape according to broadcast rules
+        output_shape = (max(tile_a_0, tile_b_0), max(tile_a_1, tile_b_1))
+
+        return Tile(
+            dtype=tile_a.dtype, shape=output_shape
+        )
+    
+class Add(MapFn):
+    """
+    A function that performs element-wise addition.
+    """
+
+    def __init__(self):
+        super().__init__()
+
+    def apply(self, input_tp: Tuple) -> Tile:
+        if len(input_tp) != 2:
+            raise ValueError("Mul requires exactly two input types.")
+
+        tile_a, tile_b = input_tp[0], input_tp[1]
+
+        if not (isinstance(tile_a, Tile) and isinstance(tile_b, Tile)):
+            raise TypeError("Both inputs to Mul must be of type Tile.")
+
+        # Check if the shapes are broadcastable for element-wise multiplication
+        tile_a_0, tile_a_1 = tile_a.shape
+        tile_b_0, tile_b_1 = tile_b.shape
+
+        # Check broadcastability for dimension 0
+        if not ((tile_a_0 == tile_b_0) or (tile_a_0 == 1) or (tile_b_0 == 1)):
+            raise ValueError(f"Shapes are not broadcastable: {tile_a.shape} and {tile_b.shape}")
+        
+        # Check broadcastability for dimension 1  
+        if not ((tile_a_1 == tile_b_1) or (tile_a_1 == 1) or (tile_b_1 == 1)):
+            raise ValueError(f"Shapes are not broadcastable: {tile_a.shape} and {tile_b.shape}")
+        
+        # Calculate the output shape according to broadcast rules
+        output_shape = (max(tile_a_0, tile_b_0), max(tile_a_1, tile_b_1))
+
+        return Tile(
+            dtype=tile_a.dtype, shape=output_shape
+        )
+
+class Silu(MapFn):
+    """
+    A function that applies the SiLU activation function.
+    """
+
+    def __init__(self):
+        super().__init__()
+
+    def apply(self, input_tp: Tuple) -> Tile:
+        if len(input_tp) != 1:
+            raise ValueError("SiLU requires exactly one input type.")
+
+        tile = input_tp[0]
+
+        if not isinstance(tile, Tile):
+            raise TypeError("Input to SiLU must be of type Tile.")
+
+        return Tile(
+            dtype=tile.dtype, shape=tile.shape
+        )  # SiLU does not change the shape

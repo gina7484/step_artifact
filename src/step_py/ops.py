@@ -480,6 +480,7 @@ class BinaryMapAccum(StepOps):
     compute_bw: int
     _stream: Stream
 
+    # [Genghan] We need an init function?
     def __init__(
         self,
         graph: MultiDiGraph,
@@ -995,3 +996,35 @@ class FlatPartition(StepOps):
             self.control = new_input
         else:
             raise ValueError("Wrong org_input")
+
+class UnaryMap(StepOps):
+    input: Union[StepOps, Tuple[StepOps, int]]
+    fn: MapFn
+    write_back_mu: bool  # whether the consumer is a bufferize or not
+    compute_bw: int
+    _stream: Stream
+
+    def __init__(
+        self,
+        graph: MultiDiGraph,
+        input: Union[StepOps, Tuple[StepOps, int]],
+        fn: MapFn,
+        write_back_mu: bool,
+        compute_bw: int,
+    ):
+        super().__init__()
+
+        self.input = input
+        self.fn = fn
+        self.write_back_mu = write_back_mu
+        self.compute_bw = compute_bw
+
+        in_stream: Stream = get_stream(input)
+
+        self._stream = Stream(
+            dtype=self.fn.apply((in_stream.dtype,)),
+            shape=in_stream.shape,
+        )
+
+        input_node = input if isinstance(input, StepOps) else input[0]
+        graph.add_edge(input_node, self)

@@ -61,7 +61,7 @@ def test_linear_mk_offchip():
         step_graph,
         False,  # logging
         HBMConfig(64, 8, 2, 2, 1, 14),
-        "/scratch/zgh23/step_tl/graph.pb",
+        "/home/zgh23/step_tl/graph.pb",
     )
 
     check_gold_tensor("output", gold)
@@ -126,7 +126,7 @@ def test_linear_mk_onchip():
         step_graph,
         False,  # logging
         HBMConfig(64, 8, 2, 2, 1, 14),
-        "/scratch/zgh23/step_tl/graph.pb",
+        "/home/zgh23/step_tl/graph.pb",
     )
 
     check_gold_tensor("output", gold)
@@ -181,7 +181,7 @@ def test_linear_mn_offchip():
         step_graph,
         False,  # logging
         HBMConfig(64, 8, 2, 2, 1, 14),
-        "/scratch/zgh23/step_tl/graph.pb",
+        "/home/zgh23/step_tl/graph.pb",
     )
 
     check_gold_tensor("output", gold)
@@ -248,7 +248,7 @@ def test_linear_mn_onchip():
         step_graph,
         False,  # logging
         HBMConfig(64, 8, 2, 2, 1, 14),
-        "/scratch/zgh23/step_tl/graph.pb",
+        "/home/zgh23/step_tl/graph.pb",
     )
 
     check_gold_tensor("output", gold)
@@ -303,7 +303,7 @@ def test_linear_mnk_offchip():
         step_graph,
         False,  # logging
         HBMConfig(64, 8, 2, 2, 1, 14),
-        "/scratch/zgh23/step_tl/graph.pb",
+        "/home/zgh23/step_tl/graph.pb",
     )
 
     check_gold_tensor("output", gold)
@@ -368,7 +368,7 @@ def test_linear_mnk_onchip():
         step_graph,
         False,  # logging
         HBMConfig(64, 8, 2, 2, 1, 14),
-        "/scratch/zgh23/step_tl/graph.pb",
+        "/home/zgh23/step_tl/graph.pb",
     )
 
     check_gold_tensor("output", gold)

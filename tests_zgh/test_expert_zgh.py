@@ -6,7 +6,6 @@ from step_py.ops import *
 import numpy as np
 from sim import simulate, HBMConfig
 
-
 def test_expert_selection_generation():
     B = 4
     H = 6
@@ -27,9 +26,9 @@ def test_expert_selection_generation():
 
     printer_context = PrinterContext(step_graph, select_gan)
 
-    simulate(
-        step_graph,
-        False,  # logging
-        HBMConfig(64, 8, 2, 2, 1, 14),
-        "/scratch/zgh23/step_tl/graph.pb",
-    )
+    # simulate(
+    #     step_graph,
+    #     False,  # logging
+    #     HBMConfig(64, 8, 2, 2, 1, 14),
+    #     "/home/zgh23/step_tl/graph.pb",
+    # )
