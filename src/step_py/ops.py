@@ -153,12 +153,112 @@ class OffChipLoad(StepOps):
 
     def replace_input(
         self,
-        org_input: Union["StepOps", Tuple["StepOps", int]],
-        new_input: Union["StepOps", Tuple["StepOps", int]],
+        org_input: Union[StepOps, Tuple[StepOps, int]],
+        new_input: Union[StepOps, Tuple[StepOps, int]],
     ):
         raise NotImplementedError(
             "Shouldn't be called for nodes that doesn't have an input stream"
         )
+
+
+class DynOffChipLoad(StepOps):
+    ref: Union[StepOps, Tuple[StepOps, int]]
+    underlying: torch.Tensor
+    tensor_shape_tiled: Tuple[int, ...]
+    stride: Tuple[int, ...]
+    out_shape_tiled: Tuple[int, ...]
+    tile_row: int
+    tile_col: int
+    n_byte: int
+    par_dispatch: int
+    _stream: Stream
+
+    def __init__(
+        self,
+        ref: Union[StepOps, Tuple[StepOps, int]],
+        underlying: torch.Tensor,
+        stride: Tuple[int, ...],
+        out_shape_tiled: Tuple[int, ...],
+        tile_row: int,
+        tile_col: int,
+        par_dispatch: int,
+    ):
+        super().__init__()
+
+        self.ref = ref
+        self.underlying = underlying
+        self.tensor_shape_tiled = tuple(
+            list(underlying.shape[:-2])
+            + [
+                underlying.shape[-2] // tile_row,
+                underlying.shape[-1] // tile_col,
+            ]
+        )
+        self.stride = stride
+        self.out_shape_tiled = out_shape_tiled
+        self.tile_row = tile_row
+        self.tile_col = tile_col
+        self.par_dispatch = par_dispatch
+
+        if underlying.dtype == torch.float32:
+            self.n_byte = 4
+
+            stream_dtype = Tile(
+                dtype=Float32(),
+                shape=(tile_row, tile_col),
+            )
+            ref_stream: Stream = get_stream(ref)
+            self._stream = Stream(
+                dtype=stream_dtype, shape=ref_stream.shape + self.out_shape_tiled
+            )
+        elif underlying.dtype == torch.float16:
+            self.n_byte = 2
+
+            stream_dtype = Tile(
+                dtype=Float16(),
+                shape=(tile_row, tile_col),
+            )
+            ref_stream: Stream = get_stream(ref)
+            self._stream = Stream(
+                dtype=stream_dtype, shape=ref_stream.shape + self.out_shape_tiled
+            )
+        else:
+            raise ValueError(f"Unsupported dtype: {underlying.dtype}")
+
+    @property
+    def stream(self) -> Stream:
+        """The stream of the operation."""
+        return self._stream
+
+    @property
+    def stream_list(self) -> List[Stream]:
+        return [self._stream]
+
+    @property
+    def input(self) -> Union["StepOps", Tuple["StepOps", int]]:
+        return self.ref
+
+    @property
+    def input_list(self) -> List[Union["StepOps", Tuple["StepOps", int]]]:
+        return [self.ref]
+
+    def stream_idx(self, idx: int) -> Stream:
+        raise NotImplementedError(
+            "Shouldn't be called for nodes that only have a single output stream"
+        )
+
+    def __str__(self):
+        cls = self.__class__.__name__
+        return f"{cls}_{self.instance_id}"
+
+    def replace_input(
+        self,
+        org_input: Union["StepOps", Tuple["StepOps", int]],
+        new_input: Union["StepOps", Tuple["StepOps", int]],
+    ):
+        if get_stream(self.ref) != get_stream(new_input):
+            raise ValueError("The shape of the input stream shouldn't change")
+        self.ref = new_input
 
 
 class RepeatStatic(StepOps):

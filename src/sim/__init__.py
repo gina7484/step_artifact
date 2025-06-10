@@ -111,6 +111,56 @@ def serialize(graph: MultiDiGraph, protobuf_file: str):
             print(f"Saved {str(op)} data to {file_path}")
 
             operator.off_chip_load.CopyFrom(offchipload_pb)
+        elif isinstance(op, DynOffChipLoad):
+            dyn_offchipload_pb = ops_pb2.DynOffChipLoad()
+
+            if isinstance(op.ref, Tuple):
+                ref_node, idx = op.ref
+                dyn_offchipload_pb.ref_stream_idx = idx
+                dyn_offchipload_pb.ref_id = ref_node.instance_id
+                if isinstance(ref_node.stream_idx(idx).dtype, MultiHot):
+                    dtype_pb = datatype_pb2.DataType()
+                    dtype_pb.multi_hot.CopyFrom(datatype_pb2.MultiHot())
+                    dyn_offchipload_pb.ref_dtype.CopyFrom(dtype_pb)
+                elif isinstance(ref_node.stream_idx(idx).dtype, Tile):
+                    dyn_offchipload_pb.ref_dtype.CopyFrom(
+                        to_pb_datatype(ref_node.stream_idx(idx).dtype.dtype)
+                    )
+                else:
+                    raise ValueError(
+                        f"Unsupported datatype({ref_node.stream_idx(idx).dtype}) for PrinterContext"
+                    )
+            else:
+                dyn_offchipload_pb.ref_id = op.ref.instance_id
+                if isinstance(op.ref.stream.dtype, MultiHot):
+                    dtype_pb = datatype_pb2.DataType()
+                    dtype_pb.multi_hot.CopyFrom(datatype_pb2.MultiHot())
+                    dyn_offchipload_pb.ref_dtype.CopyFrom(dtype_pb)
+                elif isinstance(op.ref.stream.dtype, Tile):
+                    dyn_offchipload_pb.ref_dtype.CopyFrom(
+                        to_pb_datatype(op.ref.stream.dtype.dtype)
+                    )
+                else:
+                    raise ValueError(
+                        f"Unsupported datatype({op.ref.stream.dtype}) for PrinterContext"
+                    )
+
+            dyn_offchipload_pb.tensor_shape_tiled.extend(list(op.tensor_shape_tiled))
+            dyn_offchipload_pb.stride.extend(list(op.stride))
+            dyn_offchipload_pb.out_shape_tiled.extend(list(op.out_shape_tiled))
+            dyn_offchipload_pb.tile_row = op.tile_row
+            dyn_offchipload_pb.tile_col = op.tile_col
+            dyn_offchipload_pb.n_byte = op.n_byte
+            dyn_offchipload_pb.par_dispatch = op.par_dispatch
+
+            dyn_offchipload_pb.dtype.CopyFrom(to_pb_datatype(op.stream.dtype.dtype))
+
+            file_path = f"{str(op)}.npy"
+            np.save(file_path, op.underlying.detach().numpy())
+            dyn_offchipload_pb.npy_path = file_path
+            print(f"Saved {str(op)} data to {file_path}")
+
+            operator.dyn_off_chip_load.CopyFrom(dyn_offchipload_pb)
         elif isinstance(op, BinaryMap):
             binarymap_pb = ops_pb2.BinaryMap()
 
