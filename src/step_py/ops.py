@@ -106,18 +106,22 @@ class OffChipLoad(StepOps):
             self.n_byte = 4
 
             stream_dtype = Tile(
-                dtype=Float32(),
+                tile_dtype=Float32(),
                 shape=(tile_row, tile_col),
             )
-            self._stream = Stream(dtype=stream_dtype, shape=self.out_shape_tiled)
+            self._stream = Stream(
+                stream_dtype=stream_dtype, shape=(1,) + self.out_shape_tiled
+            )
         elif underlying.dtype == torch.float16:
             self.n_byte = 2
 
             stream_dtype = Tile(
-                dtype=Float16(),
+                tile_dtype=Float16(),
                 shape=(tile_row, tile_col),
             )
-            self._stream = Stream(dtype=stream_dtype, shape=self.out_shape_tiled)
+            self._stream = Stream(
+                stream_dtype=stream_dtype, shape=(1,) + self.out_shape_tiled
+            )
         else:
             raise ValueError(f"Unsupported dtype: {underlying.dtype}")
 
@@ -175,6 +179,7 @@ class DynOffChipLoad(StepOps):
 
     def __init__(
         self,
+        graph: MultiDiGraph,
         ref: Union[StepOps, Tuple[StepOps, int]],
         underlying: torch.Tensor,
         stride: Tuple[int, ...],
@@ -200,27 +205,30 @@ class DynOffChipLoad(StepOps):
         self.tile_col = tile_col
         self.par_dispatch = par_dispatch
 
+        ref_node = ref if isinstance(ref, StepOps) else ref[0]
+        graph.add_edge(ref_node, self)
+
         if underlying.dtype == torch.float32:
             self.n_byte = 4
 
             stream_dtype = Tile(
-                dtype=Float32(),
+                tile_dtype=Float32(),
                 shape=(tile_row, tile_col),
             )
             ref_stream: Stream = get_stream(ref)
             self._stream = Stream(
-                dtype=stream_dtype, shape=ref_stream.shape + self.out_shape_tiled
+                stream_dtype=stream_dtype, shape=ref_stream.shape + self.out_shape_tiled
             )
         elif underlying.dtype == torch.float16:
             self.n_byte = 2
 
             stream_dtype = Tile(
-                dtype=Float16(),
+                tile_dtype=Float16(),
                 shape=(tile_row, tile_col),
             )
             ref_stream: Stream = get_stream(ref)
             self._stream = Stream(
-                dtype=stream_dtype, shape=ref_stream.shape + self.out_shape_tiled
+                stream_dtype=stream_dtype, shape=ref_stream.shape + self.out_shape_tiled
             )
         else:
             raise ValueError(f"Unsupported dtype: {underlying.dtype}")
@@ -278,7 +286,7 @@ class RepeatStatic(StepOps):
 
         input_stream: Stream = get_stream(input)
         self._stream = Stream(
-            dtype=input_stream.dtype,
+            stream_dtype=input_stream.stream_dtype,
             shape=tuple(input_stream.shape + (repeat_factor,)),
         )
 
@@ -340,7 +348,7 @@ class Promote(StepOps):
         stream_shape = list(input_stream.shape)
         stream_shape.insert(len(input_stream.shape) - promote_rank, 1)
         self._stream = Stream(
-            dtype=input_stream.dtype,
+            stream_dtype=input_stream.stream_dtype,
             shape=tuple(stream_shape),
         )
 
@@ -417,7 +425,9 @@ class BinaryMap(StepOps):
         ), "Input streams must have the same shape."
 
         self._stream = Stream(
-            dtype=self.fn.apply((in1_stream.dtype, in2_stream.dtype)),
+            stream_dtype=self.fn.apply(
+                (in1_stream.stream_dtype, in2_stream.stream_dtype)
+            ),
             shape=self.in1.stream.shape,
         )
 
@@ -506,15 +516,17 @@ class BinaryMapAccum(StepOps):
         assert rank > 0, "Rank must be greater than 0."
         assert (
             in1_stream.shape == in2_stream.shape
-        ), "Input streams must have the same shape."
+        ), f"Input streams must have the same shape. {in1_stream.shape} != {in2_stream.shape}"
 
         self._stream = Stream(
-            dtype=self.fn.apply((in1_stream.dtype, in2_stream.dtype)),
+            stream_dtype=self.fn.apply(
+                (in1_stream.stream_dtype, in2_stream.stream_dtype)
+            ),
             shape=self.in1.stream.shape[: -self.rank],
         )
 
-        self.accum_tile_row = self._stream.dtype.shape[-2]
-        self.accum_tile_col = self._stream.dtype.shape[-1]
+        self.accum_tile_row = self._stream.stream_dtype.shape[-2]
+        self.accum_tile_col = self._stream.stream_dtype.shape[-1]
 
         input_node1 = in1 if isinstance(in1, StepOps) else in1[0]
         input_node2 = in2 if isinstance(in2, StepOps) else in2[0]
@@ -582,7 +594,7 @@ class Broadcast(StepOps):
 
         in_stream: Stream = get_stream(input)
         self._stream = [
-            Stream(dtype=in_stream.dtype, shape=in_stream.shape)
+            Stream(stream_dtype=in_stream.stream_dtype, shape=in_stream.shape)
             for _ in range(num_consumers)
         ]
 
@@ -637,14 +649,14 @@ class OffChipStore(StepOps):
         graph: MultiDiGraph,
         input: Union[StepOps, Tuple[StepOps, int]],
         par_dispatch: int,
-        store_file_name: str = "output.npy",
+        store_file_name: str = "output",
     ):
         super().__init__()
 
         self._input = input
-        self.tensor_shape_tiled = input.stream.shape
-        self.tile_row = input.stream.dtype.shape[0]
-        self.tile_col = input.stream.dtype.shape[1]
+        self.tensor_shape_tiled = input.stream.shape[1:]
+        self.tile_row = input.stream.stream_dtype.shape[0]
+        self.tile_col = input.stream.stream_dtype.shape[1]
         self.store_file_name = store_file_name
         self.par_dispatch = par_dispatch
 
@@ -707,11 +719,13 @@ class Bufferize(StepOps):
         self.rank = rank
 
         in_stream: Stream = get_stream(input)
-        assert isinstance(in_stream.dtype, Tile), "Input stream must be a Tile type."
+        assert isinstance(
+            in_stream.stream_dtype, Tile
+        ), "Input stream must be a Tile type."
 
         buffer_shape = tuple(in_stream.shape[-rank:])
         self._stream = Stream(
-            dtype=Buffer(in_stream.dtype, buffer_shape),
+            stream_dtype=Buffer(buff_dtype=in_stream.stream_dtype, shape=buffer_shape),
             shape=in_stream.shape[: -self.rank],
         )
 
@@ -775,13 +789,13 @@ class Streamify(StepOps):
 
         in_stream: Stream = get_stream(input)
         assert isinstance(
-            in_stream.dtype, Buffer
+            in_stream.stream_dtype, Buffer
         ), "Input stream must be a Buffer type."
 
-        buffer_shape = in_stream.dtype.shape
-        buffer_dtype = in_stream.dtype.dtype
+        buffer_shape = in_stream.stream_dtype.shape
+        buffer_dtype = in_stream.stream_dtype.buff_dtype
         self._stream = Stream(
-            dtype=buffer_dtype,
+            stream_dtype=buffer_dtype,
             shape=in_stream.shape + tuple(repeat_factor) + buffer_shape,
         )
 
@@ -854,13 +868,15 @@ class DynStreamify(StepOps):
         ), "Input stream shape must match the reference stream shape up to the repeat rank."
 
         assert isinstance(
-            in_stream.dtype, Buffer
+            in_stream.stream_dtype, Buffer
         ), "Input stream must be a Buffer type."
 
-        buffer_shape = in_stream.dtype.shape
-        buffer_dtype = in_stream.dtype.dtype
+        buffer_shape = in_stream.stream_dtype.shape
+        buffer_dtype = in_stream.stream_dtype.buff_dtype
 
-        self._stream = Stream(dtype=buffer_dtype, shape=ref_stream.shape + buffer_shape)
+        self._stream = Stream(
+            stream_dtype=buffer_dtype, shape=ref_stream.shape + buffer_shape
+        )
 
         input_node = input if isinstance(input, StepOps) else input[0]
         graph.add_edge(input_node, self)
@@ -944,7 +960,7 @@ class FlatPartition(StepOps):
         new_names = sympy.symbols(f"{str(self)}_0:{num_consumers}")
         self._stream = [
             Stream(
-                dtype=in_stream.dtype,
+                stream_dtype=in_stream.stream_dtype,
                 shape=[new_names[i]] + in_stream.shape[-partition_rank:],
             )
             for i in range(num_consumers)

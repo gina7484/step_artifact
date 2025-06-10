@@ -58,7 +58,7 @@ def Linear(
         )
 
     elif isinstance(input, (StepOps, Tuple)):
-        outer_dims = get_stream(input).shape[:-1]
+        outer_dims = get_stream(input).shape[1:-1]
         if N == tile_config.n:  # TileM / TileMK (Not tiling N)
             formatted_input = Promote(graph=step_graph, input=input, promote_rank=1)
         else:  # TileMN / TileMNK (N is tiled)
@@ -67,7 +67,7 @@ def Linear(
             formatted_input = Streamify(
                 step_graph, buff, [N // tile_config.n], buff_rank
             )
-            printer = PrinterContext(step_graph, formatted_input)
+
     # ================= Load weight =================
     formatted_weight = OffChipLoad(
         underlying=weight,

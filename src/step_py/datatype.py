@@ -19,13 +19,13 @@ class Float32(ElementTP):
 
 @dataclass
 class Tile:
-    dtype: ElementTP
+    tile_dtype: ElementTP
     shape: Tuple[int, int]
 
 
 @dataclass
 class Buffer:
-    dtype: Tile
+    buff_dtype: Tile
     shape: Tuple[int, ...]
 
     @property
@@ -33,17 +33,21 @@ class Buffer:
         return len(self.shape)
 
 
-class MultiHot:
+class Select(ABC):
     pass
 
 
-class IndexN:
+class MultiHot(Select):
+    pass
+
+
+class Index(Select):
     pass
 
 
 @dataclass
 class Stream:
-    dtype: Union[Tile, Buffer]
+    stream_dtype: Union[Tile, Buffer, Select]
     shape: Tuple[Union[int, DynDim], ...]
 
     @property
