@@ -21,8 +21,8 @@ def step_impl(expert_ups, expert_downs, expert_gates, input_tensor, indices, wei
     up_loads = [
         OffChipLoad(
             underlying=expert_ups[i],
-            stride=(F // tile_F, 1),
-            out_shape_tiled=(1, F // tile_F),
+            stride=(1,),
+            out_shape_tiled=(F // tile_F,),
             tile_row=D,
             tile_col=tile_F,
             par_dispatch=offchip_par_dispatch,
@@ -56,7 +56,7 @@ def step_impl(expert_ups, expert_downs, expert_gates, input_tensor, indices, wei
 
     input_load = OffChipLoad(
         underlying=input_tensor,
-        stride=(1, 1),
+        stride=(1, N),
         out_shape_tiled=(N, 1),
         tile_row=1,
         tile_col=D,
@@ -83,6 +83,28 @@ def step_impl(expert_ups, expert_downs, expert_gates, input_tensor, indices, wei
         par_dispatch=offchip_par_dispatch,
     )
     
+    expert_feature_streams = FlatPartition(
+        step_graph,
+        input_load,
+        select_gen_feature,
+        partition_rank=1,
+        switch_cycles=[1 for _ in range(E)],
+        write_back_mu=False,
+        num_consumers=E
+    )
+
+    repeated_feature_streams = [
+        RepeatStatic(
+            step_graph,
+            stream,
+            repeat_count=F // tile_F,
+        )
+        for stream in expert_feature_streams
+    ]
+    
+
+
+
     
 
 
