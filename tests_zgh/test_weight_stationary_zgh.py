@@ -82,7 +82,7 @@ def step_impl(expert_ups, expert_downs, expert_gates, input_tensor, indices, wei
         tile_col=E,
         par_dispatch=offchip_par_dispatch,
     )
-    
+
     expert_feature_streams = FlatPartition(
         step_graph,
         input_load,
@@ -101,10 +101,6 @@ def step_impl(expert_ups, expert_downs, expert_gates, input_tensor, indices, wei
         )
         for stream in expert_feature_streams
     ]
-    
-
-
-
     
 
 
