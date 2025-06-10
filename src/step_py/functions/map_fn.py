@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
 from typing import Tuple
-from step_py.datatype import Tile
+from step_py.datatype import Tile, MultiHot, IndexN
 
 
 class MapFn(ABC):

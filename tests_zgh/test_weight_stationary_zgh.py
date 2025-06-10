@@ -66,13 +66,9 @@ def step_impl(expert_ups, expert_downs, expert_gates, input_tensor, indices, wei
 
     expert_selection_one_hot = torch.nn.functional.one_hot(indices, E)
     expert_selection_multi_hot = expert_selection_one_hot.sum(dim=-2)
-    select_gen_feature = SelectGen(
+    select_gen = SelectGen(
         is_multihot=True,
         tensor=expert_selection_multi_hot,
-    ) # [1, N]
-    select_gen_weights = SelectGen(
-        is_multihot=True,
-        tensor=weights,
     ) # [1, N]
 
     weights_load = OffChipLoad(
@@ -87,21 +83,13 @@ def step_impl(expert_ups, expert_downs, expert_gates, input_tensor, indices, wei
     expert_feature_streams = FlatPartition(
         step_graph,
         input_load,
-        select_gen_feature,
+        select_gen,
         partition_rank=0,
         switch_cycles=[1 for _ in range(E)],
         write_back_mu=False,
         num_consumers=E
     ) # [Dyn]
 
-    promoted_feature_streams = [
-        Promote(
-            step_graph,
-            stream,
-            2
-        )
-        for stream in expert_feature_streams
-    ] # [1, Dyn]
 
     deranked_up_loads = [
         Bufferize(
@@ -112,16 +100,21 @@ def step_impl(expert_ups, expert_downs, expert_gates, input_tensor, indices, wei
         for stream in up_loads
     ] # [1,]
 
+    # Data: [1,] of [F // tile_F]
+    # Ref: [Dyn,]
     ready_up_loads = [
-        DynStreamify(
+        Streamify(
             step_graph,
-            data_stream, # [1,]
-            ref_stream, # [1, Dyn]
+            ExpandRef(
+                step_graph,
+                data_stream, # [1,]
+                ref_stream, # [Dyn,]
+            ),
+            [],
             1,
-            1
         )
-        for data_stream, ref_stream in zip(deranked_up_loads, promoted_feature_streams)
-    ] # [1, Dyn, F // tile_F]
+        for data_stream, ref_stream in zip(deranked_up_loads, expert_feature_streams)
+    ] # [Dyn, F // tile_F]
 
     repeated_feature_streams = [
         RepeatStatic(
@@ -216,7 +209,44 @@ def step_impl(expert_ups, expert_downs, expert_gates, input_tensor, indices, wei
         for feature, weight in zip(projected_feature_streams, ready_down_loads)
     ] # [1, Dyn]
 
-    
+    expert_weight_streams = FlatPartition(
+        step_graph,
+        weights_load,
+        select_gen,
+        partition_rank=0,
+        switch_cycles=[1 for _ in range(E)],
+        write_back_mu=False,
+        num_consumers=E
+    ) # [Dyn]
+
+    promoted_expert_weight_streams = [
+        Promote(
+            step_graph,
+            stream,
+            1
+        )
+        for stream in expert_weight_streams
+    ] # [1, Dyn]
+
+    weighted_feature_streams = [
+        BinaryMap(
+            step_graph,
+            down_feature_streams[i],
+            promoted_expert_weight_streams[i],
+            map_fn.SelectMul(0, i)
+        )
+        for i in range(E)
+    ] # [1, Dyn]
+
+    reassembled_stream = FlatReassemble(
+        step_graph,
+        weighted_feature_streams,
+        in_stream_rank=0,
+        switch_cycles=[1 for _ in range(E)],
+        write_back_mu=False,
+    )
+
+
 
 
 
