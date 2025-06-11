@@ -1044,16 +1044,23 @@ class FlatReassemble(StepOps):
         self.write_back_mu = write_back_mu
 
         in_streams = [get_stream(input) for input in inputs]
-        assert all(
-            stream.shape[-in_stream_rank:] == in_streams[0].shape[-in_stream_rank:]
-            for stream in in_streams
-        ), "All input streams must have the same shape for the last 'in_stream_rank' dimensions."
+        if in_stream_rank != 0:
+            assert all(
+                stream.shape[-in_stream_rank:] == in_streams[0].shape[-in_stream_rank:]
+                for stream in in_streams
+            ), "All input streams must have the same shape for the last 'in_stream_rank' dimensions."
         control_stream: Stream = get_stream(control)
         new_name = sympy.Symbol(f"{str(self)}_dyn")
-        self._stream = Stream(
-            dtype=in_streams[0].dtype,
-            shape=control_stream.shape + (new_name,) + in_streams[0].shape[-in_stream_rank:]
-        )
+        if in_stream_rank == 0:
+            self._stream = Stream(
+                stream_dtype=in_streams[0].stream_dtype,
+                shape=control_stream.shape + (new_name,)
+            )
+        else:
+            self._stream = Stream(
+                stream_dtype=in_streams[0].stream_dtype,
+                shape=control_stream.shape + (new_name,) + in_streams[0].shape[-in_stream_rank:]
+            )
 
         for input_node in inputs:
             node = input_node if isinstance(input_node, StepOps) else input_node[0]
@@ -1088,7 +1095,7 @@ class UnaryMap(StepOps):
         in_stream: Stream = get_stream(input)
 
         self._stream = Stream(
-            dtype=self.fn.apply((in_stream.dtype,)),
+            stream_dtype=self.fn.apply((in_stream.stream_dtype,)),
             shape=in_stream.shape,
         )
 
@@ -1117,7 +1124,7 @@ class ExpandRef(StepOps):
         assert in_stream.shape[:-1] == ref_stream.shape[:-1]
         assert in_stream[-1] == 1
         self._stream = Stream(
-            dtype=in_stream.dtype,
+            stream_dtype=in_stream.stream_dtype,
             shape=ref_stream
         )
 
@@ -1125,4 +1132,41 @@ class ExpandRef(StepOps):
         graph.add_edge(input_node, self)
         ref_node = ref if isinstance(ref, StepOps) else ref[0]
         graph.add_edge(ref_node, self)
-        
+
+class Accum(StepOps):
+    _input: Union[StepOps, Tuple[StepOps, int]]
+    fn: MapFn
+    accum_rank: int
+    write_back_mu: bool
+    compute_bw: int
+    _stream: Stream
+
+    def __init__(
+        self,
+        graph: MultiDiGraph,
+        input: Union[StepOps, Tuple[StepOps, int]],
+        fn: MapFn,
+        accum_rank: int,
+        write_back_mu: bool,
+        compute_bw: int,
+    ):
+        super().__init__()
+
+        self._input = input
+        self.fn = fn
+        self.accum_rank = accum_rank
+        self.write_back_mu = write_back_mu
+        self.compute_bw = compute_bw
+
+        in_stream: Stream = get_stream(input)
+
+        self._stream = Stream(
+            stream_dtype=self.fn.apply((in_stream.stream_dtype,)),
+            shape=in_stream.shape[: -self.accum_rank],
+        )
+
+        input_node = input if isinstance(input, StepOps) else input[0]
+        graph.add_edge(input_node, self)
+
+
+
