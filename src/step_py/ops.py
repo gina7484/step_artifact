@@ -720,6 +720,7 @@ class Bufferize(StepOps):
         self.rank = rank
 
         in_stream: Stream = get_stream(input)
+        assert rank > 0, "Rank must be greater than 0."
         assert isinstance(
             in_stream.stream_dtype, Tile
         ), "Input stream must be a Tile type."
@@ -789,6 +790,7 @@ class Streamify(StepOps):
         self.rank = rank
 
         in_stream: Stream = get_stream(input)
+        assert rank > 0, "Rank must be greater than 0."
         assert isinstance(
             in_stream.stream_dtype, Buffer
         ), "Input stream must be a Buffer type."
@@ -846,13 +848,13 @@ class DynStreamify(StepOps):
     bufferized_rank: int
     _stream: Stream
 
-    # There is an ExpandRef hidden in the operation
+    # [Genghan] There should be an ExpandRef hidden in the operation
     def __init__(
         self,
         graph: MultiDiGraph,
         input: Union[StepOps, Tuple[StepOps, int]],
         ref: Union[StepOps, Tuple[StepOps, int]],
-        repeat_rank: int,
+        repeat_rank: int, # Starting from this dim to dim 0, the input_stream should have 1s
         bufferized_rank: int,
     ):
         super().__init__()
@@ -865,14 +867,16 @@ class DynStreamify(StepOps):
         in_stream: Stream = get_stream(input)
         ref_stream: Stream = get_stream(ref)
 
+        assert bufferized_rank > 0, "Bufferized rank must be greater than 0."
+        calc_rank = self.repeat_rank + 1
         assert (
-            in_stream.shape[: -self.repeat_rank]
-            == ref_stream.shape[: -self.repeat_rank]
-        ), "Input stream shape must match the reference stream shape up to the repeat rank."
+            in_stream.shape[: -calc_rank]
+            == ref_stream.shape[: -calc_rank]
+        ), f"Shapes up to the repeat rank don't match: {in_stream.shape[: -calc_rank]} != {ref_stream.shape[: -calc_rank]}"
 
         assert (
-            in_stream.shape[-self.repeat_rank :] == [1] * self.repeat_rank
-        ), "Input stream shape must have 1s in the repeat rank dimensions."
+            in_stream.shape[-calc_rank :] == (1,) * calc_rank
+        ), f"Input stream shape must have 1s in the repeat rank dimensions {in_stream.shape[-calc_rank :]} != {(1,) * calc_rank}."
 
         assert isinstance(
             in_stream.stream_dtype, Buffer
@@ -968,7 +972,7 @@ class FlatPartition(StepOps):
         self._stream = [
             Stream(
                 stream_dtype=in_stream.stream_dtype,
-                shape=[new_names[i]] + in_stream.shape[-partition_rank:],
+                shape=(new_names[i],) + in_stream.shape[len(in_stream.shape)-partition_rank:],
             )
             for i in range(num_consumers)
         ]
@@ -1033,7 +1037,7 @@ class FlatReassemble(StepOps):
         graph: MultiDiGraph,
         inputs: List[Union[StepOps, Tuple[StepOps, int]]],
         control: Union[StepOps, Tuple[StepOps, int]],
-        in_stream_rank: int,
+        in_stream_rank: int, # Remove dimensions at rank larger or equal to this value
         switch_cycles: List[int],
         write_back_mu: bool,
     ):
@@ -1046,25 +1050,18 @@ class FlatReassemble(StepOps):
         self.write_back_mu = write_back_mu
 
         in_streams = [get_stream(input) for input in inputs]
-        if in_stream_rank != 0:
-            assert all(
-                stream.shape[-in_stream_rank:] == in_streams[0].shape[-in_stream_rank:]
-                for stream in in_streams
-            ), "All input streams must have the same shape for the last 'in_stream_rank' dimensions."
+        assert all(
+            stream.shape[len(stream.shape)-in_stream_rank:] == in_streams[0].shape[len(in_streams[0].shape)-in_stream_rank:]
+            for stream in in_streams
+        ), "All input streams must have the same shape for the last 'in_stream_rank' dimensions."
         control_stream: Stream = get_stream(control)
         new_name = sympy.Symbol(f"{str(self)}_dyn")
-        if in_stream_rank == 0:
-            self._stream = Stream(
-                stream_dtype=in_streams[0].stream_dtype,
-                shape=control_stream.shape + (new_name,),
-            )
-        else:
-            self._stream = Stream(
-                stream_dtype=in_streams[0].stream_dtype,
-                shape=control_stream.shape
-                + (new_name,)
-                + in_streams[0].shape[-in_stream_rank:],
-            )
+        self._stream = Stream(
+            stream_dtype=in_streams[0].stream_dtype,
+            shape=control_stream.shape
+            + (new_name,)
+            + in_streams[0].shape[len(in_streams[0].shape)-in_stream_rank:],
+        )
 
         for input_node in inputs:
             node = input_node if isinstance(input_node, StepOps) else input_node[0]
@@ -1285,7 +1282,7 @@ class Accum(StepOps):
         self.compute_bw = compute_bw
 
         in_stream: Stream = get_stream(input)
-
+        assert accum_rank > 0, "Accum rank must be greater than 0."
         self._stream = Stream(
             stream_dtype=self.fn.apply((in_stream.stream_dtype,)),
             shape=in_stream.shape[: -self.accum_rank],
