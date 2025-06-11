@@ -490,6 +490,7 @@ class BinaryMapAccum(StepOps):
     compute_bw: int
     _stream: Stream
 
+    # [Genghan] We need an init function?
     def __init__(
         self,
         graph: MultiDiGraph,
@@ -779,7 +780,7 @@ class Streamify(StepOps):
         graph: MultiDiGraph,
         input: Union[StepOps, Tuple[StepOps, int]],
         repeat_factor: List[int],
-        rank: int,
+        rank: int, # The rank of the Buffer
     ):
         super().__init__()
 
@@ -845,6 +846,7 @@ class DynStreamify(StepOps):
     bufferized_rank: int
     _stream: Stream
 
+    # There is an ExpandRef hidden in the operation
     def __init__(
         self,
         graph: MultiDiGraph,
@@ -864,8 +866,12 @@ class DynStreamify(StepOps):
         ref_stream: Stream = get_stream(ref)
 
         assert (
-            in_stream.shape == ref_stream.shape[: -self.repeat_rank]
+            in_stream.shape[: -self.repeat_rank] == ref_stream.shape[: -self.repeat_rank]
         ), "Input stream shape must match the reference stream shape up to the repeat rank."
+
+        assert (
+            in_stream.shape[-self.repeat_rank:] == [1] * self.repeat_rank
+        ), "Input stream shape must have 1s in the repeat rank dimensions."
 
         assert isinstance(
             in_stream.stream_dtype, Buffer
@@ -1011,3 +1017,112 @@ class FlatPartition(StepOps):
             self.control = new_input
         else:
             raise ValueError("Wrong org_input")
+
+class FlatReassemble(StepOps):
+    _inputs: List[Union[StepOps, Tuple[StepOps, int]]]
+    control: Union[StepOps, Tuple[StepOps, int]]
+    in_stream_rank: int
+    switch_cycles: List[int]
+    write_back_mu: bool
+    _stream: List[Stream]
+
+    def __init__(
+        self,
+        graph: MultiDiGraph,
+        inputs: List[Union[StepOps, Tuple[StepOps, int]]],
+        control: Union[StepOps, Tuple[StepOps, int]],
+        in_stream_rank: int,
+        switch_cycles: List[int],
+        write_back_mu: bool,
+    ):
+        super().__init__()
+
+        self._inputs = inputs
+        self.control = control
+        self.in_stream_rank = in_stream_rank
+        self.switch_cycles = switch_cycles
+        self.write_back_mu = write_back_mu
+
+        in_streams = [get_stream(input) for input in inputs]
+        assert all(
+            stream.shape[-in_stream_rank:] == in_streams[0].shape[-in_stream_rank:]
+            for stream in in_streams
+        ), "All input streams must have the same shape for the last 'in_stream_rank' dimensions."
+        control_stream: Stream = get_stream(control)
+        new_name = sympy.Symbol(f"{str(self)}_dyn")
+        self._stream = Stream(
+            dtype=in_streams[0].dtype,
+            shape=control_stream.shape + (new_name,) + in_streams[0].shape[-in_stream_rank:]
+        )
+
+        for input_node in inputs:
+            node = input_node if isinstance(input_node, StepOps) else input_node[0]
+            graph.add_edge(node, self)
+
+        control_node = control if isinstance(control, StepOps) else control[0]
+        graph.add_edge(control_node, self)
+
+
+class UnaryMap(StepOps):
+    input: Union[StepOps, Tuple[StepOps, int]]
+    fn: MapFn
+    write_back_mu: bool  # whether the consumer is a bufferize or not
+    compute_bw: int
+    _stream: Stream
+
+    def __init__(
+        self,
+        graph: MultiDiGraph,
+        input: Union[StepOps, Tuple[StepOps, int]],
+        fn: MapFn,
+        write_back_mu: bool,
+        compute_bw: int,
+    ):
+        super().__init__()
+
+        self.input = input
+        self.fn = fn
+        self.write_back_mu = write_back_mu
+        self.compute_bw = compute_bw
+
+        in_stream: Stream = get_stream(input)
+
+        self._stream = Stream(
+            dtype=self.fn.apply((in_stream.dtype,)),
+            shape=in_stream.shape,
+        )
+
+        input_node = input if isinstance(input, StepOps) else input[0]
+        graph.add_edge(input_node, self)
+
+class ExpandRef(StepOps):
+    _input: Union[StepOps, Tuple[StepOps, int]]
+    ref: Union[StepOps, Tuple[StepOps, int]]
+    _stream: Stream
+
+    def __init__(
+        self,
+        graph: MultiDiGraph,
+        input: Union[StepOps, Tuple[StepOps, int]],
+        ref: Union[StepOps, Tuple[StepOps, int]],
+    ):
+        super().__init__()
+
+        self._input = input
+        self.ref = ref
+
+        in_stream: Stream = get_stream(input)
+        ref_stream: Stream = get_stream(ref)
+
+        assert in_stream.shape[:-1] == ref_stream.shape[:-1]
+        assert in_stream[-1] == 1
+        self._stream = Stream(
+            dtype=in_stream.dtype,
+            shape=ref_stream
+        )
+
+        input_node = input if isinstance(input, StepOps) else input[0]
+        graph.add_edge(input_node, self)
+        ref_node = ref if isinstance(ref, StepOps) else ref[0]
+        graph.add_edge(ref_node, self)
+        

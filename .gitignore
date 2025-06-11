@@ -8,3 +8,4 @@
 *.svg
 target/
 .github/
+.pytest_cache/
