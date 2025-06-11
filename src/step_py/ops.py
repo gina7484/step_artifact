@@ -854,7 +854,7 @@ class DynStreamify(StepOps):
         graph: MultiDiGraph,
         input: Union[StepOps, Tuple[StepOps, int]],
         ref: Union[StepOps, Tuple[StepOps, int]],
-        repeat_rank: int, # Starting from this dim to dim 0, the input_stream should have 1s
+        repeat_rank: int,  # Starting from this dim to dim 0, the input_stream should have 1s
         bufferized_rank: int,
     ):
         super().__init__()
@@ -870,12 +870,11 @@ class DynStreamify(StepOps):
         assert bufferized_rank > 0, "Bufferized rank must be greater than 0."
         calc_rank = self.repeat_rank + 1
         assert (
-            in_stream.shape[: -calc_rank]
-            == ref_stream.shape[: -calc_rank]
+            in_stream.shape[:-calc_rank] == ref_stream.shape[:-calc_rank]
         ), f"Shapes up to the repeat rank don't match: {in_stream.shape[: -calc_rank]} != {ref_stream.shape[: -calc_rank]}"
 
         assert (
-            in_stream.shape[-calc_rank :] == (1,) * calc_rank
+            in_stream.shape[-calc_rank:] == (1,) * calc_rank
         ), f"Input stream shape must have 1s in the repeat rank dimensions {in_stream.shape[-calc_rank :]} != {(1,) * calc_rank}."
 
         assert isinstance(
@@ -972,7 +971,8 @@ class FlatPartition(StepOps):
         self._stream = [
             Stream(
                 stream_dtype=in_stream.stream_dtype,
-                shape=(new_names[i],) + in_stream.shape[len(in_stream.shape)-partition_rank:],
+                shape=(new_names[i],)
+                + in_stream.shape[len(in_stream.shape) - partition_rank :],
             )
             for i in range(num_consumers)
         ]
@@ -1037,7 +1037,7 @@ class FlatReassemble(StepOps):
         graph: MultiDiGraph,
         inputs: List[Union[StepOps, Tuple[StepOps, int]]],
         control: Union[StepOps, Tuple[StepOps, int]],
-        in_stream_rank: int, # Remove dimensions at rank larger or equal to this value
+        in_stream_rank: int,  # Remove dimensions at rank larger or equal to this value
         switch_cycles: List[int],
         write_back_mu: bool,
     ):
@@ -1051,7 +1051,8 @@ class FlatReassemble(StepOps):
 
         in_streams = [get_stream(input) for input in inputs]
         assert all(
-            stream.shape[len(stream.shape)-in_stream_rank:] == in_streams[0].shape[len(in_streams[0].shape)-in_stream_rank:]
+            stream.shape[len(stream.shape) - in_stream_rank :]
+            == in_streams[0].shape[len(in_streams[0].shape) - in_stream_rank :]
             for stream in in_streams
         ), "All input streams must have the same shape for the last 'in_stream_rank' dimensions."
         control_stream: Stream = get_stream(control)
@@ -1060,7 +1061,7 @@ class FlatReassemble(StepOps):
             stream_dtype=in_streams[0].stream_dtype,
             shape=control_stream.shape
             + (new_name,)
-            + in_streams[0].shape[len(in_streams[0].shape)-in_stream_rank:],
+            + in_streams[0].shape[len(in_streams[0].shape) - in_stream_rank :],
         )
 
         for input_node in inputs:
@@ -1323,5 +1324,89 @@ class Accum(StepOps):
         new_input: Union["StepOps", Tuple["StepOps", int]],
     ):
         if get_stream(self._input) != get_stream(new_input):
+            raise ValueError("The shape of the input stream shouldn't change")
+        self._input = new_input
+
+
+class Flatten(StepOps):
+    _input: Union[StepOps, Tuple[StepOps, int]]
+    flatten_dims: Tuple[int, ...]
+    _stream: Stream
+
+    def __init__(
+        self,
+        graph: MultiDiGraph,
+        input: Union[StepOps, Tuple[StepOps, int]],
+        flatten_dims: Tuple[int, ...],
+    ):
+        super().__init__()
+        self._input = input
+        self.flatten_dims = flatten_dims
+
+        input_stream: Stream = get_stream(input)
+        self._stream = Stream(
+            stream_dtype=input_stream.stream_dtype,
+            shape=tuple(
+                self._compute_flattened_shape(input_stream.shape, flatten_dims)
+            ),
+        )
+
+        input_node = input if isinstance(input, StepOps) else input[0]
+        graph.add_edge(input_node, self)
+
+    def _compute_flattened_shape(self, original_shape, flatten_dims):
+        shape = list(original_shape)
+        n = len(shape)
+
+        # Determine which adjacent pairs of dimensions to merge
+        merge_pairs = []
+        for i in flatten_dims:
+            idx1 = n - i - 1  # First dimension to merge
+            idx2 = n - i  # Second dimension to merge
+            if 0 <= idx1 < n and 0 <= idx2 < n:
+                merge_pairs.append((idx1, idx2))
+
+        # Sort by the first index to process consistently
+        merge_pairs.sort()
+
+        # Apply merges from right to left to avoid index shifting issues
+        for idx1, idx2 in reversed(merge_pairs):
+            new_dim = shape[idx1] * shape[idx2]
+            shape = shape[:idx1] + [new_dim] + shape[idx2 + 1 :]
+
+        return shape
+
+    @property
+    def stream(self) -> Stream:
+        """The stream of the operation."""
+        return self._stream
+
+    @property
+    def stream_list(self) -> List[Stream]:
+        return [self._stream]
+
+    @property
+    def input(self) -> Union["StepOps", Tuple["StepOps", int]]:
+        return self._input
+
+    @property
+    def input_list(self) -> List[Union["StepOps", Tuple["StepOps", int]]]:
+        return [self._input]
+
+    def stream_idx(self, idx: int) -> Stream:
+        raise NotImplementedError(
+            "Shouldn't be called for nodes that only have a single output stream"
+        )
+
+    def __str__(self):
+        cls = self.__class__.__name__
+        return f"{cls}_{self.instance_id}"
+
+    def replace_input(
+        self,
+        org_input: Union["StepOps", Tuple["StepOps", int]],
+        new_input: Union["StepOps", Tuple["StepOps", int]],
+    ):
+        if get_stream(self.input) != get_stream(new_input):
             raise ValueError("The shape of the input stream shouldn't change")
         self._input = new_input
