@@ -60,7 +60,7 @@ class Matmul(MapFn):
             )
 
         return Tile(
-            dtype=tile_a.dtype, shape=result_shape
+            tile_dtype=tile_a.tile_dtype, shape=result_shape
         )  # Return the resulting Tile type
     
 class SelectMul(MapFn):

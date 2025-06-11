@@ -1,5 +1,7 @@
 cd step_perf_ir/proto
 protoc --python_out=../../src/proto/ graph.proto ops.proto datatype.proto func.proto
+# You might need to add the --experimental_allow_proto3_optional flag if the command above fails to generate .proto files under --python_out
+# protoc --experimental_allow_proto3_optional --python_out=../../src/proto/ graph.proto ops.proto datatype.proto func.proto
 cd ../../
 
 cd step-perf

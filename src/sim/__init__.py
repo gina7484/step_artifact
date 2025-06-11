@@ -4,7 +4,7 @@ from step_py.ops import *
 from step_py.utility_ops import *
 from step_py.functions import map_fn
 from proto import datatype_pb2, func_pb2, graph_pb2, ops_pb2
-from step_py.datatype import ElementTP, Float32
+from step_py.datatype import *
 import numpy as np
 import step_perf
 
@@ -47,13 +47,44 @@ def to_pb_elem_to_elem_func(op_fn: map_fn.MapFn) -> func_pb2.ElemtoElemFunc:
     return func_pb
 
 
-def to_pb_datatype(dtype: ElementTP) -> datatype_pb2.DataType:
-    if isinstance(dtype, Float32):
+def to_pb_datatype(dtype: Union[Tile, Buffer, Select]) -> datatype_pb2.DataType:
+    if isinstance(dtype, Tile):
+        if isinstance(dtype.tile_dtype, Float32):
+            dtype_pb = datatype_pb2.DataType()
+            dtype_pb.f32.CopyFrom(datatype_pb2.F32())
+            return dtype_pb
+        elif isinstance(dtype.tile_dtype, Float16):
+            dtype_pb = datatype_pb2.DataType()
+            dtype_pb.f16.CopyFrom(datatype_pb2.F16())
+            return dtype_pb
+        else:
+            raise ValueError(f"Unsupported Tile datatype({dtype})")
+    elif isinstance(dtype, Buffer):
         dtype_pb = datatype_pb2.DataType()
-        dtype_pb.f32.CopyFrom(datatype_pb2.F32())
-        return dtype_pb
+        if isinstance(dtype.buff_dtype, Tile):
+            buff_pb = datatype_pb2.Buffer()
 
-    raise ValueError(f"Unsupported datatype({dtype}) for serialization")
+            if isinstance(dtype.buff_dtype.tile_dtype, Float32):
+                buff_pb.f32.CopyFrom(datatype_pb2.F32())
+            elif isinstance(dtype.buff_dtype.tile_dtype, Float16):
+                buff_pb.f16.CopyFrom(datatype_pb2.F16())
+            else:
+                raise ValueError(
+                    f"Unsupported Tile datatype({dtype.buff_dtype.tile_dtype}) for Buffer"
+                )
+
+            dtype_pb.buffer.CopyFrom(buff_pb)
+            return dtype_pb
+    elif isinstance(dtype, Select):
+        dtype_pb = datatype_pb2.DataType()
+        if isinstance(dtype, MultiHot):
+            dtype_pb.multi_hot.CopyFrom(datatype_pb2.MultiHot())
+            return dtype_pb
+        if isinstance(dtype, Index):
+            dtype_pb.index.CopyFrom(datatype_pb2.Index())
+            return dtype_pb
+
+        raise ValueError(f"Unsupported Select datatype({dtype})")
 
 
 # pylint: disable=no-member
@@ -78,12 +109,12 @@ def serialize(graph: MultiDiGraph, protobuf_file: str):
                 offchipstore_pb.input_id = input_node.instance_id
                 offchipstore_pb.stream_idx = idx
                 offchipstore_pb.dtype.CopyFrom(
-                    to_pb_datatype(input_node.stream_idx(idx).dtype.dtype)
+                    to_pb_datatype(input_node.stream_idx(idx).stream_dtype)
                 )
             else:
                 offchipstore_pb.input_id = op.input.instance_id
                 offchipstore_pb.dtype.CopyFrom(
-                    to_pb_datatype(op.input.stream.dtype.dtype)
+                    to_pb_datatype(op.input.stream.stream_dtype)
                 )
 
             offchipstore_pb.tensor_shape_tiled.extend(list(op.tensor_shape_tiled))
@@ -103,7 +134,7 @@ def serialize(graph: MultiDiGraph, protobuf_file: str):
             offchipload_pb.n_byte = op.n_byte
             offchipload_pb.par_dispatch = op.par_dispatch
 
-            offchipload_pb.dtype.CopyFrom(to_pb_datatype(op.stream.dtype.dtype))
+            offchipload_pb.dtype.CopyFrom(to_pb_datatype(op.stream.stream_dtype))
 
             file_path = f"{str(op)}.npy"
             np.save(file_path, op.underlying.detach().numpy())
@@ -118,32 +149,15 @@ def serialize(graph: MultiDiGraph, protobuf_file: str):
                 ref_node, idx = op.ref
                 dyn_offchipload_pb.ref_stream_idx = idx
                 dyn_offchipload_pb.ref_id = ref_node.instance_id
-                if isinstance(ref_node.stream_idx(idx).dtype, MultiHot):
-                    dtype_pb = datatype_pb2.DataType()
-                    dtype_pb.multi_hot.CopyFrom(datatype_pb2.MultiHot())
-                    dyn_offchipload_pb.ref_dtype.CopyFrom(dtype_pb)
-                elif isinstance(ref_node.stream_idx(idx).dtype, Tile):
-                    dyn_offchipload_pb.ref_dtype.CopyFrom(
-                        to_pb_datatype(ref_node.stream_idx(idx).dtype.dtype)
-                    )
-                else:
-                    raise ValueError(
-                        f"Unsupported datatype({ref_node.stream_idx(idx).dtype}) for PrinterContext"
-                    )
+                dyn_offchipload_pb.ref_dtype.CopyFrom(
+                    to_pb_datatype(ref_node.stream_idx(idx).stream_dtype)
+                )
+
             else:
                 dyn_offchipload_pb.ref_id = op.ref.instance_id
-                if isinstance(op.ref.stream.dtype, MultiHot):
-                    dtype_pb = datatype_pb2.DataType()
-                    dtype_pb.multi_hot.CopyFrom(datatype_pb2.MultiHot())
-                    dyn_offchipload_pb.ref_dtype.CopyFrom(dtype_pb)
-                elif isinstance(op.ref.stream.dtype, Tile):
-                    dyn_offchipload_pb.ref_dtype.CopyFrom(
-                        to_pb_datatype(op.ref.stream.dtype.dtype)
-                    )
-                else:
-                    raise ValueError(
-                        f"Unsupported datatype({op.ref.stream.dtype}) for PrinterContext"
-                    )
+                dyn_offchipload_pb.ref_dtype.CopyFrom(
+                    to_pb_datatype(op.ref.stream.stream_dtype)
+                )
 
             dyn_offchipload_pb.tensor_shape_tiled.extend(list(op.tensor_shape_tiled))
             dyn_offchipload_pb.stride.extend(list(op.stride))
@@ -153,7 +167,7 @@ def serialize(graph: MultiDiGraph, protobuf_file: str):
             dyn_offchipload_pb.n_byte = op.n_byte
             dyn_offchipload_pb.par_dispatch = op.par_dispatch
 
-            dyn_offchipload_pb.dtype.CopyFrom(to_pb_datatype(op.stream.dtype.dtype))
+            dyn_offchipload_pb.dtype.CopyFrom(to_pb_datatype(op.stream.stream_dtype))
 
             file_path = f"{str(op)}.npy"
             np.save(file_path, op.underlying.detach().numpy())
@@ -169,11 +183,13 @@ def serialize(graph: MultiDiGraph, protobuf_file: str):
                 binarymap_pb.stream_idx1 = idx
                 binarymap_pb.input_id1 = input_node.instance_id
                 binarymap_pb.dtype_a.CopyFrom(
-                    to_pb_datatype(input_node.stream_idx(idx).dtype.dtype)
+                    to_pb_datatype(input_node.stream_idx(idx).stream_dtype)
                 )
             else:
                 binarymap_pb.input_id1 = op.in1.instance_id
-                binarymap_pb.dtype_a.CopyFrom(to_pb_datatype(op.in1.stream.dtype.dtype))
+                binarymap_pb.dtype_a.CopyFrom(
+                    to_pb_datatype(op.in1.stream.stream_dtype)
+                )
 
             if isinstance(op.in2, Tuple):
                 input_node, idx = op.in2
@@ -197,7 +213,7 @@ def serialize(graph: MultiDiGraph, protobuf_file: str):
             binarymap_pb.compute_bw = op.compute_bw
             binarymap_pb.write_back_mu = op.write_back_mu
 
-            binarymap_pb.dtype_b.CopyFrom(to_pb_datatype(op.stream.dtype.dtype))
+            binarymap_pb.dtype_b.CopyFrom(to_pb_datatype(op.stream.stream_dtype))
 
             operator.binarymap.CopyFrom(binarymap_pb)
         elif isinstance(op, Bufferize):
@@ -211,7 +227,9 @@ def serialize(graph: MultiDiGraph, protobuf_file: str):
                 bufferize_pb.input_id = op.input.instance_id
 
             bufferize_pb.rank = op.rank
-            bufferize_pb.dtype.CopyFrom(to_pb_datatype(op.stream.dtype.dtype.dtype))
+            bufferize_pb.dtype.CopyFrom(
+                to_pb_datatype(op.stream.stream_dtype.buff_dtype)
+            )
 
             operator.bufferize.CopyFrom(bufferize_pb)
         elif isinstance(op, Streamify):
@@ -226,7 +244,7 @@ def serialize(graph: MultiDiGraph, protobuf_file: str):
 
             streamify_pb.repeat_factor.extend(list(op.repeat_factor))
             streamify_pb.rank = op.rank
-            streamify_pb.dtype.CopyFrom(to_pb_datatype(op.stream.dtype.dtype))
+            streamify_pb.dtype.CopyFrom(to_pb_datatype(op.stream.stream_dtype))
 
             operator.streamify.CopyFrom(streamify_pb)
         elif isinstance(op, DynStreamify):
@@ -244,17 +262,17 @@ def serialize(graph: MultiDiGraph, protobuf_file: str):
                 dynstreamify_pb.ref_stream_idx = idx
                 dynstreamify_pb.ref_id = ref_node.instance_id
                 dynstreamify_pb.ref_dtype.CopyFrom(
-                    to_pb_datatype(ref_node.stream_idx(idx).dtype.dtype)
+                    to_pb_datatype(ref_node.stream_idx(idx).stream_dtype)
                 )
             else:
                 dynstreamify_pb.ref_id = op.ref.instance_id
                 dynstreamify_pb.ref_dtype.CopyFrom(
-                    to_pb_datatype(op.ref.stream.dtype.dtype)
+                    to_pb_datatype(op.ref.stream.stream_dtype)
                 )
 
             dynstreamify_pb.bufferized_rank = op.bufferized_rank
             dynstreamify_pb.repeat_rank = op.repeat_rank
-            dynstreamify_pb.input_dtype.CopyFrom(to_pb_datatype(op.stream.dtype.dtype))
+            dynstreamify_pb.input_dtype.CopyFrom(to_pb_datatype(op.stream.stream_dtype))
 
             operator.dyn_streamify.CopyFrom(dynstreamify_pb)
         elif isinstance(op, BinaryMapAccum):
@@ -265,12 +283,12 @@ def serialize(graph: MultiDiGraph, protobuf_file: str):
                 binarymapaccum_pb.stream_idx1 = idx
                 binarymapaccum_pb.input_id1 = input_node.instance_id
                 binarymapaccum_pb.dtype_a.CopyFrom(
-                    to_pb_datatype(input_node.stream_idx(idx).dtype.dtype)
+                    to_pb_datatype(input_node.stream_idx(idx).stream_dtype)
                 )
             else:
                 binarymapaccum_pb.input_id1 = op.in1.instance_id
                 binarymapaccum_pb.dtype_a.CopyFrom(
-                    to_pb_datatype(op.in1.stream.dtype.dtype)
+                    to_pb_datatype(op.in1.stream.stream_dtype)
                 )
 
             if isinstance(op.in2, Tuple):
@@ -287,7 +305,7 @@ def serialize(graph: MultiDiGraph, protobuf_file: str):
             binarymapaccum_pb.compute_bw = op.compute_bw
             binarymapaccum_pb.write_back_mu = op.write_back_mu
 
-            binarymapaccum_pb.dtype_b.CopyFrom(to_pb_datatype(op.stream.dtype.dtype))
+            binarymapaccum_pb.dtype_b.CopyFrom(to_pb_datatype(op.stream.stream_dtype))
 
             operator.binarymap_accum.CopyFrom(binarymapaccum_pb)
         elif isinstance(op, RepeatStatic):
@@ -302,7 +320,7 @@ def serialize(graph: MultiDiGraph, protobuf_file: str):
                 repeatstatic_pb.input_id = op.input.instance_id
 
             repeatstatic_pb.repeat_factor = op.repeat_factor
-            repeatstatic_pb.dtype.CopyFrom(to_pb_datatype(op.stream.dtype.dtype))
+            repeatstatic_pb.dtype.CopyFrom(to_pb_datatype(op.stream.stream_dtype))
 
             operator.repeat_static.CopyFrom(repeatstatic_pb)
         elif isinstance(op, Broadcast):
@@ -316,7 +334,7 @@ def serialize(graph: MultiDiGraph, protobuf_file: str):
                 broadcast_pb.input_id = op.input.instance_id
 
             broadcast_pb.num_consumers = op.num_consumers
-            broadcast_pb.dtype.CopyFrom(to_pb_datatype(op.stream_idx(0).dtype.dtype))
+            broadcast_pb.dtype.CopyFrom(to_pb_datatype(op.stream_idx(0).stream_dtype))
 
             operator.broadcast.CopyFrom(broadcast_pb)
         elif isinstance(op, FlatPartition):
@@ -327,12 +345,12 @@ def serialize(graph: MultiDiGraph, protobuf_file: str):
                 flatpartition_pb.input_stream_idx = idx
                 flatpartition_pb.input_id = input_node.instance_id
                 flatpartition_pb.input_dtype.CopyFrom(
-                    to_pb_datatype(input_node.stream_idx(idx).dtype.dtype)
+                    to_pb_datatype(input_node.stream_idx(idx).stream_dtype)
                 )
             else:
                 flatpartition_pb.input_id = op.input.instance_id
                 flatpartition_pb.input_dtype.CopyFrom(
-                    to_pb_datatype(op.input.stream.dtype.dtype)
+                    to_pb_datatype(op.input.stream.stream_dtype)
                 )
 
             if isinstance(op.control, Tuple):
@@ -340,13 +358,13 @@ def serialize(graph: MultiDiGraph, protobuf_file: str):
                 flatpartition_pb.control_stream_idx = idx
                 flatpartition_pb.control_id = control_node.instance_id
                 flatpartition_pb.control_dtype.CopyFrom(
-                    to_pb_datatype(control_node.stream_idx(idx).dtype.dtype)
+                    to_pb_datatype(control_node.stream_idx(idx).stream_dtype)
                 )
 
             else:
                 flatpartition_pb.control_id = op.control.instance_id
                 flatpartition_pb.control_dtype.CopyFrom(
-                    to_pb_datatype(op.control.stream.dtype.dtype)
+                    to_pb_datatype(op.control.stream.stream_dtype)
                 )
 
             flatpartition_pb.partition_rank = op.partition_rank
@@ -367,7 +385,7 @@ def serialize(graph: MultiDiGraph, protobuf_file: str):
                 promote_pb.input_id = op.input.instance_id
 
             promote_pb.promote_rank = op.promote_rank
-            promote_pb.dtype.CopyFrom(to_pb_datatype(op.stream.dtype.dtype))
+            promote_pb.dtype.CopyFrom(to_pb_datatype(op.stream.stream_dtype))
 
             operator.promote.CopyFrom(promote_pb)
         elif isinstance(op, SelectGen):
@@ -388,34 +406,15 @@ def serialize(graph: MultiDiGraph, protobuf_file: str):
                 input_node, idx = op.input
                 printercontext_pb.stream_idx = idx
                 printercontext_pb.input_id = input_node.instance_id
-                if isinstance(input_node.stream_idx(idx).dtype, MultiHot):
-                    dtype_pb = datatype_pb2.DataType()
-                    dtype_pb.multi_hot.CopyFrom(datatype_pb2.MultiHot())
-                    printercontext_pb.dtype.CopyFrom(dtype_pb)
-                elif isinstance(input_node.stream_idx(idx).dtype, Tile):
-                    printercontext_pb.dtype.CopyFrom(
-                        to_pb_datatype(input_node.stream_idx(idx).dtype.dtype)
-                    )
-                else:
-                    raise ValueError(
-                        f"Unsupported datatype({input_node.stream_idx(idx).dtype}) for PrinterContext"
-                    )
+                printercontext_pb.dtype.CopyFrom(
+                    to_pb_datatype(input_node.stream_idx(idx).stream_dtype)
+                )
 
             else:
                 printercontext_pb.input_id = op.input.instance_id
-
-                if isinstance(op.input.stream.dtype, MultiHot):
-                    dtype_pb = datatype_pb2.DataType()
-                    dtype_pb.multi_hot.CopyFrom(datatype_pb2.MultiHot())
-                    printercontext_pb.dtype.CopyFrom(dtype_pb)
-                elif isinstance(op.input.stream.dtype, Tile):
-                    printercontext_pb.dtype.CopyFrom(
-                        to_pb_datatype(op.input.stream.dtype.dtype)
-                    )
-                else:
-                    raise ValueError(
-                        f"Unsupported datatype({op.input.stream.dtype}) for PrinterContext"
-                    )
+                printercontext_pb.dtype.CopyFrom(
+                    to_pb_datatype(op.input.stream.stream_dtype)
+                )
 
             operator.printer_context.CopyFrom(printercontext_pb)
         else:

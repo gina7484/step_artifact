@@ -2,7 +2,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 import torch
 from typing import List, Tuple, Union
-from step_py.datatype import MultiHot, IndexN, Stream
+from step_py.datatype import MultiHot, Index, Stream
 from step_py.ops import StepOps, get_stream
 from networkx import MultiDiGraph
 
@@ -66,7 +66,7 @@ class SelectGen(StepOps):
         self.is_multihot = is_multihot
         self.underlying = tensor
 
-        dtype = MultiHot() if is_multihot else IndexN()
+        dtype = MultiHot() if is_multihot else Index()
         self._stream = Stream(dtype=dtype, shape=tuple(tensor.shape[:-1]))
 
     @property
