@@ -256,7 +256,7 @@ def step_impl(expert_ups, expert_downs, expert_gates, input_tensor, indices, wei
         step_graph,
         weighted_feature_streams, # [Dyn]
         select_gen, # [1, N]
-        in_stream_rank=0,
+        reassemble_rank=0,
         switch_cycles=[1 for _ in range(E)],
         write_back_mu=False,
     ) # [1, N, Ragged]

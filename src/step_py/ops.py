@@ -1031,7 +1031,7 @@ class FlatPartition(StepOps):
 class FlatReassemble(StepOps):
     _inputs: List[Union[StepOps, Tuple[StepOps, int]]]
     control: Union[StepOps, Tuple[StepOps, int]]
-    in_stream_rank: int
+    reassemble_rank: int
     switch_cycles: List[int]
     write_back_mu: bool
     _stream: Stream
@@ -1041,7 +1041,7 @@ class FlatReassemble(StepOps):
         graph: MultiDiGraph,
         inputs: List[Union[StepOps, Tuple[StepOps, int]]],
         control: Union[StepOps, Tuple[StepOps, int]],
-        in_stream_rank: int,  # Remove dimensions at rank larger or equal to this value
+        reassemble_rank: int,  # Remove dimensions at rank larger or equal to this value
         switch_cycles: List[int],
         write_back_mu: bool,
     ):
@@ -1049,23 +1049,23 @@ class FlatReassemble(StepOps):
 
         self._inputs = inputs
         self.control = control
-        self.in_stream_rank = in_stream_rank
+        self.reassemble_rank = reassemble_rank
         self.switch_cycles = switch_cycles
         self.write_back_mu = write_back_mu
 
         in_streams = [get_stream(input) for input in inputs]
         assert all(
-            stream.shape[len(stream.shape) - in_stream_rank :]
-            == in_streams[0].shape[len(in_streams[0].shape) - in_stream_rank :]
+            stream.shape[len(stream.shape) - reassemble_rank :]
+            == in_streams[0].shape[len(in_streams[0].shape) - reassemble_rank :]
             for stream in in_streams
-        ), "All input streams must have the same shape for the last 'in_stream_rank' dimensions."
+        ), "All input streams must have the same shape for the last 'reassemble_rank' dimensions."
         control_stream: Stream = get_stream(control)
         new_name = sympy.Symbol(f"{str(self)}_dyn")
         self._stream = Stream(
             stream_dtype=in_streams[0].stream_dtype,
             shape=control_stream.shape
             + (new_name,)
-            + in_streams[0].shape[len(in_streams[0].shape) - in_stream_rank :],
+            + in_streams[0].shape[len(in_streams[0].shape) - reassemble_rank :],
         )
 
         for input_node in inputs:
