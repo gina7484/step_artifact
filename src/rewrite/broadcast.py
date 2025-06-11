@@ -30,8 +30,14 @@ def infer_broadcast(graph: nx.MultiDiGraph) -> nx.MultiDiGraph:
                 # [TODO] Fix this for BinaryMap and DynStreamify
                 regrouped_dst_node_list = [[] for _ in range(node.num_consumers)]
                 for dst_node in dst_node_list:
-                    _, idx = dst_node.input
-                    regrouped_dst_node_list[idx].append(dst_node)
+                    input_list = dst_node.input_list
+                    for input_to_dst_node in input_list:
+                        if isinstance(input_to_dst_node, tuple):
+                            src_of_dst_node, src_idx_of_dst_node = input_to_dst_node
+                            if src_of_dst_node == node:
+                                regrouped_dst_node_list[src_idx_of_dst_node].append(
+                                    dst_node
+                                )
 
                 for idx, dst_node_list_i in enumerate(regrouped_dst_node_list):
 
