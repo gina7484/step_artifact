@@ -50,7 +50,7 @@ def step_impl(expert_ups, expert_downs, expert_gates, input_tensor, indices, wei
     gate_loads = [
         OffChipLoad(
             underlying=expert_gates[i],
-            stride=(1),
+            stride=(1,),
             out_shape_tiled=(F // tile_F,),
             tile_row=D,
             tile_col=tile_F,
@@ -264,7 +264,7 @@ def step_impl(expert_ups, expert_downs, expert_gates, input_tensor, indices, wei
     # Stage 16: Accumulate the reassembled features
     accumed_stream = Accum(
         step_graph,
-        reassembled_stream, # [1, N]
+        reassembled_stream, # [1, N, Ragged]
         Tile(
             tile_dtype=Float32(),
             shape=(1, D)
@@ -283,7 +283,7 @@ def step_impl(expert_ups, expert_downs, expert_gates, input_tensor, indices, wei
         store_file_name="output"
     ) # [1, N]
 
-    step_graph = infer_broadcast(step_graph)
+    # step_graph = infer_broadcast(step_graph)
     OUTPUT_FILENAME = "moe_weight_stationary"
     save_graph_format(step_graph, OUTPUT_FILENAME, ["png"])
     return output

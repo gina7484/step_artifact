@@ -102,6 +102,8 @@ class OffChipLoad(StepOps):
         self.tile_col = tile_col
         self.par_dispatch = par_dispatch
 
+        print(f"Load tensor shape tiled: {self.tensor_shape_tiled}")
+
         if underlying.dtype == torch.float32:
             self.n_byte = 4
 
@@ -112,6 +114,7 @@ class OffChipLoad(StepOps):
             self._stream = Stream(
                 stream_dtype=stream_dtype, shape=(1,) + self.out_shape_tiled
             )
+            print(f"Load stream shape: {self._stream.shape}")
         elif underlying.dtype == torch.float16:
             self.n_byte = 2
 
@@ -661,6 +664,9 @@ class OffChipStore(StepOps):
         self.store_file_name = store_file_name
         self.par_dispatch = par_dispatch
 
+        print(f"Store tensor shape tiled: {self.tensor_shape_tiled}")
+        print(f"Store stream shape: {input.stream.shape}")
+
         input_node = input if isinstance(input, StepOps) else input[0]
         graph.add_edge(input_node, self)
 
@@ -687,10 +693,14 @@ class OffChipStore(StepOps):
 
     def get_untiled_shape(self) -> Tuple[int, ...]:
         """Get the un-tiled shape of the tensor."""
-        return self.tensor_shape_tiled[:-2] + (
-            self.tensor_shape_tiled[-2] * self.tile_row,
-            self.tensor_shape_tiled[-1] * self.tile_col,
-        )
+        if len(self.tensor_shape_tiled) == 1:
+            return (self.tensor_shape_tiled[-1] * self.tile_row,
+                    self.tile_col)
+        else:
+            return self.tensor_shape_tiled[:-2] + (
+                self.tensor_shape_tiled[-2] * self.tile_row,
+                self.tensor_shape_tiled[-1] * self.tile_col,
+            )
 
     def __str__(self):
         cls = self.__class__.__name__
