@@ -67,7 +67,7 @@ class SelectGen(StepOps):
         self.underlying = tensor
 
         dtype = MultiHot() if is_multihot else Index()
-        self._stream = Stream(dtype=dtype, shape=tuple(tensor.shape[:-1]))
+        self._stream = Stream(stream_dtype=dtype, shape=tuple(tensor.shape[:-1]))
 
     @property
     def stream(self) -> Stream:
