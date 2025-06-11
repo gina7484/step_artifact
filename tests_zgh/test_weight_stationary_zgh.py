@@ -283,7 +283,7 @@ def step_impl(expert_ups, expert_downs, expert_gates, input_tensor, indices, wei
         store_file_name="output"
     ) # [1, N]
 
-    # step_graph = infer_broadcast(step_graph)
+    step_graph = infer_broadcast(step_graph)
     OUTPUT_FILENAME = "moe_weight_stationary"
     save_graph_format(step_graph, OUTPUT_FILENAME, ["png"])
     return output

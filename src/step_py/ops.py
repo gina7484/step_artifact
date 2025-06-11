@@ -975,6 +975,7 @@ class FlatPartition(StepOps):
         graph.add_edge(control_node, self)
 
         in_stream: Stream = get_stream(input)
+        # [Genghan] A trick: StepOps should use the same control_node to align the outermost dimension
         new_names = sympy.symbols(f"{str(control_node)}_0:{num_consumers}")
         self._stream = [
             Stream(
@@ -984,8 +985,6 @@ class FlatPartition(StepOps):
             )
             for i in range(num_consumers)
         ]
-
-
 
     @property
     def stream(self) -> Stream:
@@ -1336,51 +1335,51 @@ class Accum(StepOps):
 
 class Flatten(StepOps):
     _input: Union[StepOps, Tuple[StepOps, int]]
-    flatten_dims: Tuple[int, ...]
+    min_rank: int
+    max_rank: int
     _stream: Stream
 
     def __init__(
         self,
         graph: MultiDiGraph,
         input: Union[StepOps, Tuple[StepOps, int]],
-        flatten_dims: Tuple[int, ...],
+        min_rank: int,
+        max_rank: int
     ):
         super().__init__()
         self._input = input
-        self.flatten_dims = flatten_dims
+        self.min_rank = min_rank
+        self.max_rank = max_rank
 
         input_stream: Stream = get_stream(input)
         self._stream = Stream(
             stream_dtype=input_stream.stream_dtype,
             shape=tuple(
-                self._compute_flattened_shape(input_stream.shape, flatten_dims)
+                self._compute_flattened_shape(input_stream.shape, min_rank, max_rank)
             ),
         )
 
         input_node = input if isinstance(input, StepOps) else input[0]
         graph.add_edge(input_node, self)
 
-    def _compute_flattened_shape(self, original_shape, flatten_dims):
-        shape = list(original_shape)
-        n = len(shape)
-
-        # Determine which adjacent pairs of dimensions to merge
-        merge_pairs = []
-        for i in flatten_dims:
-            idx1 = n - i - 1  # First dimension to merge
-            idx2 = n - i  # Second dimension to merge
-            if 0 <= idx1 < n and 0 <= idx2 < n:
-                merge_pairs.append((idx1, idx2))
-
-        # Sort by the first index to process consistently
-        merge_pairs.sort()
-
-        # Apply merges from right to left to avoid index shifting issues
-        for idx1, idx2 in reversed(merge_pairs):
-            new_dim = shape[idx1] * shape[idx2]
-            shape = shape[:idx1] + [new_dim] + shape[idx2 + 1 :]
-
-        return shape
+    def _compute_flattened_shape(self, shape, min_rank, max_rank):
+        # Convert ranks to indices (rank 0 = rightmost = highest index)
+        min_index = len(shape) - 1 - max_rank  # Note: max_rank gives min_index
+        max_index = len(shape) - 1 - min_rank  # Note: min_rank gives max_index
+        
+        # Validate indices
+        if min_index < 0 or max_index >= len(shape) or min_index > max_index:
+            raise ValueError("Invalid rank range")
+        
+        # Calculate merged dimension
+        merged_dim = 1
+        for i in range(min_index, max_index + 1):
+            merged_dim *= shape[i]
+        
+        # Build new shape
+        new_shape = shape[:min_index] + (merged_dim,) + shape[max_index + 1:]
+        
+        return new_shape
 
     @property
     def stream(self) -> Stream:
