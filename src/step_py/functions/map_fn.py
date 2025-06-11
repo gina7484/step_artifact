@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
 from typing import Tuple
-from step_py.datatype import Tile, MultiHot, IndexN
+from step_py.datatype import Tile, MultiHot, Index
 
 
 class MapFn(ABC):
@@ -62,7 +62,8 @@ class Matmul(MapFn):
         return Tile(
             tile_dtype=tile_a.tile_dtype, shape=result_shape
         )  # Return the resulting Tile type
-    
+
+
 class SelectMul(MapFn):
     select_row_id: int
     select_col_id: int
@@ -79,16 +80,14 @@ class SelectMul(MapFn):
 
         if not (isinstance(tile_2d, Tile) and isinstance(tile_1d, Tile)):
             raise TypeError("Both inputs to SelectMul must be of type Tile.")
-        
 
         result_shape = (
             tile_2d.shape[0],
             tile_2d.shape[1],
         )
-        return Tile(
-            tile_dtype=tile_2d.tile_dtype, shape=result_shape
-        )
-    
+        return Tile(tile_dtype=tile_2d.tile_dtype, shape=result_shape)
+
+
 class Mul(MapFn):
     """
     A function that performs element-wise multiplication.
@@ -112,19 +111,22 @@ class Mul(MapFn):
 
         # Check broadcastability for dimension 0
         if not ((tile_a_0 == tile_b_0) or (tile_a_0 == 1) or (tile_b_0 == 1)):
-            raise ValueError(f"Shapes are not broadcastable: {tile_a.shape} and {tile_b.shape}")
-        
-        # Check broadcastability for dimension 1  
+            raise ValueError(
+                f"Shapes are not broadcastable: {tile_a.shape} and {tile_b.shape}"
+            )
+
+        # Check broadcastability for dimension 1
         if not ((tile_a_1 == tile_b_1) or (tile_a_1 == 1) or (tile_b_1 == 1)):
-            raise ValueError(f"Shapes are not broadcastable: {tile_a.shape} and {tile_b.shape}")
-        
+            raise ValueError(
+                f"Shapes are not broadcastable: {tile_a.shape} and {tile_b.shape}"
+            )
+
         # Calculate the output shape according to broadcast rules
         output_shape = (max(tile_a_0, tile_b_0), max(tile_a_1, tile_b_1))
 
-        return Tile(
-            tile_dtype=tile_a.tile_dtype, shape=output_shape
-        )
-    
+        return Tile(tile_dtype=tile_a.tile_dtype, shape=output_shape)
+
+
 class Add(MapFn):
     """
     A function that performs element-wise addition.
@@ -148,18 +150,21 @@ class Add(MapFn):
 
         # Check broadcastability for dimension 0
         if not ((tile_a_0 == tile_b_0) or (tile_a_0 == 1) or (tile_b_0 == 1)):
-            raise ValueError(f"Shapes are not broadcastable: {tile_a.shape} and {tile_b.shape}")
-        
-        # Check broadcastability for dimension 1  
+            raise ValueError(
+                f"Shapes are not broadcastable: {tile_a.shape} and {tile_b.shape}"
+            )
+
+        # Check broadcastability for dimension 1
         if not ((tile_a_1 == tile_b_1) or (tile_a_1 == 1) or (tile_b_1 == 1)):
-            raise ValueError(f"Shapes are not broadcastable: {tile_a.shape} and {tile_b.shape}")
-        
+            raise ValueError(
+                f"Shapes are not broadcastable: {tile_a.shape} and {tile_b.shape}"
+            )
+
         # Calculate the output shape according to broadcast rules
         output_shape = (max(tile_a_0, tile_b_0), max(tile_a_1, tile_b_1))
 
-        return Tile(
-            tile_dtype=tile_a.tile_dtype, shape=output_shape
-        )
+        return Tile(tile_dtype=tile_a.tile_dtype, shape=output_shape)
+
 
 class Silu(MapFn):
     """
