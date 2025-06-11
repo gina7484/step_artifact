@@ -219,7 +219,7 @@ def step_impl(expert_ups, expert_downs, expert_gates, input_tensor, indices, wei
             step_graph,
             feature,
             weight,
-            map_fn.Matmul(weight_transposed=True),
+            map_fn.Matmul(weight_transposed=False),
             1,
             False,
             1024
@@ -254,21 +254,26 @@ def step_impl(expert_ups, expert_downs, expert_gates, input_tensor, indices, wei
     # Stage 15: Reassemble the weighted features
     reassembled_stream = FlatReassemble(
         step_graph,
-        weighted_feature_streams,
+        weighted_feature_streams, # [Dyn]
+        select_gen, # [1, N]
         in_stream_rank=0,
         switch_cycles=[1 for _ in range(E)],
         write_back_mu=False,
-    ) # [Dyn, Ragged]
+    ) # [1, N, Ragged]
 
     # Stage 16: Accumulate the reassembled features
     accumed_stream = Accum(
         step_graph,
-        reassembled_stream,
+        reassembled_stream, # [1, N]
+        Tile(
+            tile_dtype=Float32(),
+            shape=(1, D)
+        ), 
         map_fn.Add(),
         1,
         False,
         1024
-    ) # [Dyn]
+    ) # [1, N]
 
     # Stage 17: Store the output
     output = OffChipStore(

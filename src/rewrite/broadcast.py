@@ -28,7 +28,7 @@ def infer_broadcast(graph: nx.MultiDiGraph) -> nx.MultiDiGraph:
             if node.num_consumers < len(dst_node_list):
                 # This means there is broadcast happening in some of the output streams
 
-                regrouped_dst_node_list = [[] for _ in node.num_consumers]
+                regrouped_dst_node_list = [[] for _ in range(node.num_consumers)]
                 for dst_node in dst_node_list:
                     _, idx = dst_node.input
                     regrouped_dst_node_list[idx].append(dst_node)

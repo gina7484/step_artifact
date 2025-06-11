@@ -3,7 +3,7 @@ from dataclasses import dataclass
 import torch
 from typing import List, Tuple, Union
 from step_py.functions.map_fn import MapFn
-from step_py.datatype import Buffer, Stream, Tile, Float16, Float32
+from step_py.datatype import Buffer, Stream, Tile, Select, Float16, Float32
 from networkx import MultiDiGraph
 import sympy
 
@@ -965,9 +965,13 @@ class FlatPartition(StepOps):
         self.switch_cycles = switch_cycles
         self.write_back_mu = write_back_mu
 
+        input_node = input if isinstance(input, StepOps) else input[0]
+        control_node = control if isinstance(control, StepOps) else control[0]
+        graph.add_edge(input_node, self)
+        graph.add_edge(control_node, self)
+
         in_stream: Stream = get_stream(input)
-        control_stream: Stream = get_stream(control)
-        new_names = sympy.symbols(f"{str(self)}_0:{num_consumers}")
+        new_names = sympy.symbols(f"{str(control_node)}_0:{num_consumers}")
         self._stream = [
             Stream(
                 stream_dtype=in_stream.stream_dtype,
@@ -977,10 +981,7 @@ class FlatPartition(StepOps):
             for i in range(num_consumers)
         ]
 
-        input_node = input if isinstance(input, StepOps) else input[0]
-        control_node = control if isinstance(control, StepOps) else control[0]
-        graph.add_edge(input_node, self)
-        graph.add_edge(control_node, self)
+
 
     @property
     def stream(self) -> Stream:
@@ -1269,6 +1270,7 @@ class Accum(StepOps):
         self,
         graph: MultiDiGraph,
         input: Union[StepOps, Tuple[StepOps, int]],
+        output_stream_dtype: Union[Tile, Buffer, Select],
         fn: MapFn,
         accum_rank: int,
         write_back_mu: bool,
@@ -1285,7 +1287,7 @@ class Accum(StepOps):
         in_stream: Stream = get_stream(input)
         assert accum_rank > 0, "Accum rank must be greater than 0."
         self._stream = Stream(
-            stream_dtype=self.fn.apply((in_stream.stream_dtype,)),
+            stream_dtype=self.fn.apply((in_stream.stream_dtype, output_stream_dtype)),
             shape=in_stream.shape[: -self.accum_rank],
         )
 
