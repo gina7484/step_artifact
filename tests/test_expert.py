@@ -372,7 +372,7 @@ def test_weight_routing():
         graph=step_graph,
         inputs=expert_loaders_gate,
         control=control,
-        in_stream_rank=REASSEMBLE_RANK,
+        reassemble_rank=REASSEMBLE_RANK,
         switch_cycles=[1] * EXPERT,
         write_back_mu=False,
     )
@@ -421,7 +421,7 @@ def test_weight_routing():
         graph=step_graph,
         inputs=expert_loaders_up,
         control=control,
-        in_stream_rank=REASSEMBLE_RANK,
+        reassemble_rank=REASSEMBLE_RANK,
         switch_cycles=[1] * EXPERT,
         write_back_mu=False,
     )
@@ -522,7 +522,7 @@ def test_weight_routing():
         graph=step_graph,
         inputs=expert_loaders_down,
         control=control,
-        in_stream_rank=REASSEMBLE_RANK,
+        reassemble_rank=REASSEMBLE_RANK,
         switch_cycles=[1] * EXPERT,
         write_back_mu=False,
     )
