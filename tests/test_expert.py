@@ -385,7 +385,7 @@ def test_weight_routing():
     )
 
     flattened_w_gate_reassemble = Flatten(
-        graph=step_graph, input=w_gate_reassemble, flatten_dims=(2,)
+        graph=step_graph, input=w_gate_reassemble, min_rank=1, max_rank=2
     )
 
     w_up_partition = FlatPartition(
@@ -434,7 +434,7 @@ def test_weight_routing():
     )
 
     flattened_w_up_reassemble = Flatten(
-        graph=step_graph, input=w_up_reassemble, flatten_dims=(2,)
+        graph=step_graph, input=w_up_reassemble, min_rank=1, max_rank=2
     )
 
     # # ---------- Computation ----------
@@ -535,7 +535,7 @@ def test_weight_routing():
     )
 
     flattened_w_down_reassemble = Flatten(
-        graph=step_graph, input=w_down_reassemble, flatten_dims=(2,)
+        graph=step_graph, input=w_down_reassemble, min_rank=1, max_rank=2
     )
 
     # ---------- Computation ----------

@@ -137,7 +137,7 @@ class Add(MapFn):
 
     def apply(self, input_tp: Tuple) -> Tile:
         if len(input_tp) != 2:
-            raise ValueError("Mul requires exactly two input types.")
+            raise ValueError("All requires exactly two input types.")
 
         tile_a, tile_b = input_tp[0], input_tp[1]
 
