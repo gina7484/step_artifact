@@ -852,13 +852,13 @@ class DynStreamify(StepOps):
     bufferized_rank: int
     _stream: Stream
 
-    # [Genghan] There should be an ExpandRef hidden in the operation
+    # [Genghan] There is an ExpandRef hidden in the operation
     def __init__(
         self,
         graph: MultiDiGraph,
         input: Union[StepOps, Tuple[StepOps, int]],
         ref: Union[StepOps, Tuple[StepOps, int]],
-        repeat_rank: int,  # Starting from this dim to dim 0, the input_stream should have 1s
+        repeat_rank: int,  # Starting from this rank to rank 0, the input_stream should have 1s
         bufferized_rank: int,
     ):
         super().__init__()
@@ -1193,24 +1193,33 @@ class UnaryMap(StepOps):
 class ExpandRef(StepOps):
     _input: Union[StepOps, Tuple[StepOps, int]]
     ref: Union[StepOps, Tuple[StepOps, int]]
+    repeat_rank: int
     _stream: Stream
 
     def __init__(
         self,
         graph: MultiDiGraph,
         input: Union[StepOps, Tuple[StepOps, int]],
+        repeat_rank: int,
         ref: Union[StepOps, Tuple[StepOps, int]],
     ):
         super().__init__()
 
         self._input = input
         self.ref = ref
+        self.repeat_rank = repeat_rank
 
         in_stream: Stream = get_stream(input)
         ref_stream: Stream = get_stream(ref)
 
-        assert in_stream.shape[:-1] == ref_stream.shape[:-1]
-        assert in_stream[-1] == 1
+        calc_rank = self.repeat_rank + 1
+        assert (
+            in_stream.shape[:-calc_rank] == ref_stream.shape[:-calc_rank]
+        ), f"Shapes up to the repeat rank don't match: {in_stream.shape[: -calc_rank]} != {ref_stream.shape[: -calc_rank]}"
+
+        assert (
+            in_stream.shape[-calc_rank:] == (1,) * calc_rank
+        ), f"Input stream shape must have 1s in the repeat rank dimensions {in_stream.shape[-calc_rank :]} != {(1,) * calc_rank}."
         self._stream = Stream(stream_dtype=in_stream.stream_dtype, shape=ref_stream)
 
         input_node = input if isinstance(input, StepOps) else input[0]
