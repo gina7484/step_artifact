@@ -103,14 +103,11 @@ def step_impl(expert_ups, expert_downs, expert_gates, input_tensor, indices, wei
     # Data: [1,] of [F // tile_F]
     # Ref: [Dyn,]
     ready_up_loads = [
-        Streamify(
+        DynStreamify(
             step_graph,
-            ExpandRef(
-                step_graph,
-                data_stream, # [1,]
-                ref_stream, # [Dyn,]
-            ),
-            [],
+            data_stream, # [1,]
+            ref_stream, # [Dyn,]
+            0,
             1,
         )
         for data_stream, ref_stream in zip(deranked_up_loads, expert_feature_streams)
@@ -122,8 +119,8 @@ def step_impl(expert_ups, expert_downs, expert_gates, input_tensor, indices, wei
             stream,
             repeat_count=F // tile_F,
         )
-        for stream in promoted_feature_streams
-    ] # [1, Dyn, F // tile_F]
+        for stream in expert_feature_streams
+    ] # [Dyn, F // tile_F]
 
     up_feature_streams = [
         BinaryMap(
@@ -133,7 +130,7 @@ def step_impl(expert_ups, expert_downs, expert_gates, input_tensor, indices, wei
             map_fn.Matmul(weight_transposed=False),
         )
         for feature, weight in zip(repeated_feature_streams, ready_up_loads)
-    ] # [1, Dyn, F // tile_F]
+    ] # [Dyn, F // tile_F]
 
     # Do the same for gate_loads
     deranked_gate_loads = [
@@ -148,12 +145,12 @@ def step_impl(expert_ups, expert_downs, expert_gates, input_tensor, indices, wei
         DynStreamify(
             step_graph,
             data_stream, # [1,]
-            ref_stream, # [1, Dyn]
+            ref_stream, # [Dyn,]
+            0,
             1,
-            1
         )
         for data_stream, ref_stream in zip(deranked_gate_loads, promoted_feature_streams)
-    ] # [1, Dyn, F // tile_F]
+    ] # [Dyn, F // tile_F]
     gate_feature_streams = [
         UnaryMap(
             step_graph,
@@ -166,7 +163,7 @@ def step_impl(expert_ups, expert_downs, expert_gates, input_tensor, indices, wei
             map_fn.Silu()
         )
         for feature, weight in zip(repeated_feature_streams, ready_gate_loads)
-    ] # [1, Dyn, F // tile_F]
+    ] # [Dyn, F // tile_F]
 
     projected_feature_streams = [
         BinaryMap(
@@ -176,7 +173,7 @@ def step_impl(expert_ups, expert_downs, expert_gates, input_tensor, indices, wei
             map_fn.Mul()
         )
         for up_feature, gate_feature in zip(up_feature_streams, gate_feature_streams)
-    ] # [1, Dyn, F // tile_F]
+    ] # [Dyn, F // tile_F]
 
     deranked_down_loads = [
         Bufferize(
@@ -190,12 +187,12 @@ def step_impl(expert_ups, expert_downs, expert_gates, input_tensor, indices, wei
         DynStreamify(
             step_graph,
             data_stream, # [1,]
-            ref_stream, # [1, Dyn]
+            ref_stream, # [Dyn,]
+            0,
             1,
-            1
         )
         for data_stream, ref_stream in zip(deranked_down_loads, promoted_feature_streams)
-    ] # [1, Dyn, F // tile_F]
+    ] # [Dyn, F // tile_F]
     down_feature_streams = [
         BinaryMapAccum(
             step_graph,
@@ -207,7 +204,7 @@ def step_impl(expert_ups, expert_downs, expert_gates, input_tensor, indices, wei
             1024
         )
         for feature, weight in zip(projected_feature_streams, ready_down_loads)
-    ] # [1, Dyn]
+    ] # [Dyn]
 
     expert_weight_streams = FlatPartition(
         step_graph,
@@ -219,24 +216,16 @@ def step_impl(expert_ups, expert_downs, expert_gates, input_tensor, indices, wei
         num_consumers=E
     ) # [Dyn]
 
-    promoted_expert_weight_streams = [
-        Promote(
-            step_graph,
-            stream,
-            1
-        )
-        for stream in expert_weight_streams
-    ] # [1, Dyn]
 
     weighted_feature_streams = [
         BinaryMap(
             step_graph,
             down_feature_streams[i],
-            promoted_expert_weight_streams[i],
+            expert_weight_streams[i],
             map_fn.SelectMul(0, i)
         )
         for i in range(E)
-    ] # [1, Dyn]
+    ] # [Dyn]
 
     reassembled_stream = FlatReassemble(
         step_graph,
@@ -244,7 +233,27 @@ def step_impl(expert_ups, expert_downs, expert_gates, input_tensor, indices, wei
         in_stream_rank=0,
         switch_cycles=[1 for _ in range(E)],
         write_back_mu=False,
-    )
+    ) # [Dyn, Ragged]
+
+    accumed_stream = Accum(
+        step_graph,
+        reassembled_stream,
+        map_fn.Add(),
+        1,
+        False,
+        1024
+    ) # [Dyn]
+
+    output_stream = OffChipStore(
+        step_graph,
+        accumed_stream,
+        underlying=input_tensor,
+        stride=(1,),
+        out_shape_tiled=(N,),
+        tile_row=1,
+        tile_col=D,
+        par_dispatch=offchip_par_dispatch,
+    ) # [1, N]
 
 
 

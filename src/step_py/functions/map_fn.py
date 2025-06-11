@@ -86,7 +86,7 @@ class SelectMul(MapFn):
             tile_2d.shape[1],
         )
         return Tile(
-            dtype=tile_2d.dtype, shape=result_shape
+            tile_dtype=tile_2d.tile_dtype, shape=result_shape
         )
     
 class Mul(MapFn):
@@ -122,7 +122,7 @@ class Mul(MapFn):
         output_shape = (max(tile_a_0, tile_b_0), max(tile_a_1, tile_b_1))
 
         return Tile(
-            dtype=tile_a.dtype, shape=output_shape
+            tile_dtype=tile_a.tile_dtype, shape=output_shape
         )
     
 class Add(MapFn):
@@ -158,7 +158,7 @@ class Add(MapFn):
         output_shape = (max(tile_a_0, tile_b_0), max(tile_a_1, tile_b_1))
 
         return Tile(
-            dtype=tile_a.dtype, shape=output_shape
+            tile_dtype=tile_a.tile_dtype, shape=output_shape
         )
 
 class Silu(MapFn):
@@ -173,11 +173,11 @@ class Silu(MapFn):
         if len(input_tp) != 1:
             raise ValueError("SiLU requires exactly one input type.")
 
-        tile = input_tp[0]
+        in_tile = input_tp[0]
 
-        if not isinstance(tile, Tile):
+        if not isinstance(in_tile, Tile):
             raise TypeError("Input to SiLU must be of type Tile.")
 
         return Tile(
-            dtype=tile.dtype, shape=tile.shape
+            tile_dtype=in_tile.tile_dtype, shape=in_tile.shape
         )  # SiLU does not change the shape
