@@ -1,0 +1,1112 @@
+from abc import ABC, abstractmethod
+from dataclasses import dataclass
+import torch
+from typing import List, Tuple, Union
+from step_py.functions.map_fn import MapFn
+from step_py.datatype import Buffer, Stream, Tile, Float16, Float32
+from networkx import MultiDiGraph
+import sympy
+
+
+def get_stream(input: Union["StepOps", Tuple["StepOps", int]]) -> Stream:
+    if isinstance(input, StepOps):
+        return input.stream
+
+    if (
+        isinstance(input, Tuple)
+        and isinstance(input[0], StepOps)
+        and isinstance(input[1], int)
+    ):
+        input_node, stream_idx = input
+        return input_node.stream_idx(stream_idx)
+    else:
+        raise TypeError("Wrong input type!")
+
+
+class StepOps(ABC):
+    _counter: int = 0
+    instance_id: int
+
+    def __init__(self):
+        self.instance_id = StepOps._counter
+        StepOps._counter += 1
+
+    @property
+    @abstractmethod
+    def stream(self) -> Stream:
+        """The stream of the operation."""
+        pass
+
+    @property
+    @abstractmethod
+    def stream_list(self) -> List[Stream]:
+        pass
+
+    @property
+    @abstractmethod
+    def input(self) -> Union["StepOps", Tuple["StepOps", int]]:
+        pass
+
+    @property
+    @abstractmethod
+    def input_list(self) -> List[Union["StepOps", Tuple["StepOps", int]]]:
+        pass
+
+    @abstractmethod
+    def stream_idx(self, idx: int) -> Stream:
+        """The stream of the operation."""
+        pass
+
+    @abstractmethod
+    def replace_input(
+        self,
+        org_input: Union["StepOps", Tuple["StepOps", int]],
+        new_input: Union["StepOps", Tuple["StepOps", int]],
+    ):
+        pass
+
+
+class OffChipLoad(StepOps):
+    underlying: torch.Tensor
+    tensor_shape_tiled: Tuple[int, ...]
+    stride: Tuple[int, ...]
+    out_shape_tiled: Tuple[int, ...]
+    tile_row: int
+    tile_col: int
+    n_byte: int
+    par_dispatch: int
+    _stream: Stream
+
+    def __init__(
+        self,
+        underlying: torch.Tensor,
+        stride: Tuple[int, ...],
+        out_shape_tiled: Tuple[int, ...],
+        tile_row: int,
+        tile_col: int,
+        par_dispatch: int,
+    ):
+        super().__init__()
+
+        self.underlying = underlying
+        self.tensor_shape_tiled = tuple(
+            list(underlying.shape[:-2])
+            + [
+                underlying.shape[-2] // tile_row,
+                underlying.shape[-1] // tile_col,
+            ]
+        )
+        self.stride = stride
+        self.out_shape_tiled = out_shape_tiled
+        self.tile_row = tile_row
+        self.tile_col = tile_col
+        self.par_dispatch = par_dispatch
+
+        if underlying.dtype == torch.float32:
+            self.n_byte = 4
+
+            stream_dtype = Tile(
+                dtype=Float32(),
+                shape=(tile_row, tile_col),
+            )
+            self._stream = Stream(dtype=stream_dtype, shape=self.out_shape_tiled)
+        elif underlying.dtype == torch.float16:
+            self.n_byte = 2
+
+            stream_dtype = Tile(
+                dtype=Float16(),
+                shape=(tile_row, tile_col),
+            )
+            self._stream = Stream(dtype=stream_dtype, shape=self.out_shape_tiled)
+        else:
+            raise ValueError(f"Unsupported dtype: {underlying.dtype}")
+
+    @property
+    def stream(self) -> Stream:
+        """The stream of the operation."""
+        return self._stream
+
+    @property
+    def stream_list(self) -> List[Stream]:
+        return [self._stream]
+
+    @property
+    def input(self) -> Union["StepOps", Tuple["StepOps", int]]:
+        raise NotImplementedError(
+            "Shouldn't be called for nodes that doesn't have an input stream"
+        )
+
+    @property
+    def input_list(self) -> List[Union["StepOps", Tuple["StepOps", int]]]:
+        raise NotImplementedError(
+            "Shouldn't be called for nodes that doesn't have an input stream"
+        )
+
+    def stream_idx(self, idx: int) -> Stream:
+        raise NotImplementedError(
+            "Shouldn't be called for nodes that only have a single output stream"
+        )
+
+    def __str__(self):
+        cls = self.__class__.__name__
+        return f"{cls}_{self.instance_id}"
+
+    def replace_input(
+        self,
+        org_input: Union[StepOps, Tuple[StepOps, int]],
+        new_input: Union[StepOps, Tuple[StepOps, int]],
+    ):
+        raise NotImplementedError(
+            "Shouldn't be called for nodes that doesn't have an input stream"
+        )
+
+
+class DynOffChipLoad(StepOps):
+    ref: Union[StepOps, Tuple[StepOps, int]]
+    underlying: torch.Tensor
+    tensor_shape_tiled: Tuple[int, ...]
+    stride: Tuple[int, ...]
+    out_shape_tiled: Tuple[int, ...]
+    tile_row: int
+    tile_col: int
+    n_byte: int
+    par_dispatch: int
+    _stream: Stream
+
+    def __init__(
+        self,
+        ref: Union[StepOps, Tuple[StepOps, int]],
+        underlying: torch.Tensor,
+        stride: Tuple[int, ...],
+        out_shape_tiled: Tuple[int, ...],
+        tile_row: int,
+        tile_col: int,
+        par_dispatch: int,
+    ):
+        super().__init__()
+
+        self.ref = ref
+        self.underlying = underlying
+        self.tensor_shape_tiled = tuple(
+            list(underlying.shape[:-2])
+            + [
+                underlying.shape[-2] // tile_row,
+                underlying.shape[-1] // tile_col,
+            ]
+        )
+        self.stride = stride
+        self.out_shape_tiled = out_shape_tiled
+        self.tile_row = tile_row
+        self.tile_col = tile_col
+        self.par_dispatch = par_dispatch
+
+        if underlying.dtype == torch.float32:
+            self.n_byte = 4
+
+            stream_dtype = Tile(
+                dtype=Float32(),
+                shape=(tile_row, tile_col),
+            )
+            ref_stream: Stream = get_stream(ref)
+            self._stream = Stream(
+                dtype=stream_dtype, shape=ref_stream.shape + self.out_shape_tiled
+            )
+        elif underlying.dtype == torch.float16:
+            self.n_byte = 2
+
+            stream_dtype = Tile(
+                dtype=Float16(),
+                shape=(tile_row, tile_col),
+            )
+            ref_stream: Stream = get_stream(ref)
+            self._stream = Stream(
+                dtype=stream_dtype, shape=ref_stream.shape + self.out_shape_tiled
+            )
+        else:
+            raise ValueError(f"Unsupported dtype: {underlying.dtype}")
+
+    @property
+    def stream(self) -> Stream:
+        """The stream of the operation."""
+        return self._stream
+
+    @property
+    def stream_list(self) -> List[Stream]:
+        return [self._stream]
+
+    @property
+    def input(self) -> Union["StepOps", Tuple["StepOps", int]]:
+        return self.ref
+
+    @property
+    def input_list(self) -> List[Union["StepOps", Tuple["StepOps", int]]]:
+        return [self.ref]
+
+    def stream_idx(self, idx: int) -> Stream:
+        raise NotImplementedError(
+            "Shouldn't be called for nodes that only have a single output stream"
+        )
+
+    def __str__(self):
+        cls = self.__class__.__name__
+        return f"{cls}_{self.instance_id}"
+
+    def replace_input(
+        self,
+        org_input: Union["StepOps", Tuple["StepOps", int]],
+        new_input: Union["StepOps", Tuple["StepOps", int]],
+    ):
+        if get_stream(self.ref) != get_stream(new_input):
+            raise ValueError("The shape of the input stream shouldn't change")
+        self.ref = new_input
+
+
+class RepeatStatic(StepOps):
+    _input: Union[StepOps, Tuple[StepOps, int]]
+    repeat_factor: int
+    _stream: Stream
+
+    def __init__(
+        self,
+        graph: MultiDiGraph,
+        input: Union[StepOps, Tuple[StepOps, int]],
+        repeat_factor: int,
+    ):
+        super().__init__()
+        self._input = input
+        self.repeat_factor = repeat_factor
+
+        input_stream: Stream = get_stream(input)
+        self._stream = Stream(
+            dtype=input_stream.dtype,
+            shape=tuple(input_stream.shape + (repeat_factor,)),
+        )
+
+        input_node = input if isinstance(input, StepOps) else input[0]
+        graph.add_edge(input_node, self)
+
+    @property
+    def stream(self) -> Stream:
+        """The stream of the operation."""
+        return self._stream
+
+    @property
+    def stream_list(self) -> List[Stream]:
+        return [self._stream]
+
+    @property
+    def input(self) -> Union["StepOps", Tuple["StepOps", int]]:
+        return self._input
+
+    @property
+    def input_list(self) -> List[Union["StepOps", Tuple["StepOps", int]]]:
+        return [self._input]
+
+    def stream_idx(self, idx: int) -> Stream:
+        raise NotImplementedError(
+            "Shouldn't be called for nodes that only have a single output stream"
+        )
+
+    def __str__(self):
+        cls = self.__class__.__name__
+        return f"{cls}_{self.instance_id}"
+
+    def replace_input(
+        self,
+        org_input: Union["StepOps", Tuple["StepOps", int]],
+        new_input: Union["StepOps", Tuple["StepOps", int]],
+    ):
+        if get_stream(self.input) != get_stream(new_input):
+            raise ValueError("The shape of the input stream shouldn't change")
+        self._input = new_input
+
+
+class Promote(StepOps):
+    _input: Union[StepOps, Tuple[StepOps, int]]
+    promote_rank: int
+    _stream: Stream
+
+    def __init__(
+        self,
+        graph: MultiDiGraph,
+        input: Union[StepOps, Tuple[StepOps, int]],
+        promote_rank: int,
+    ):
+        super().__init__()
+        self._input = input
+        self.promote_rank = promote_rank
+
+        input_stream: Stream = get_stream(input)
+        stream_shape = list(input_stream.shape)
+        stream_shape.insert(len(input_stream.shape) - promote_rank, 1)
+        self._stream = Stream(
+            dtype=input_stream.dtype,
+            shape=tuple(stream_shape),
+        )
+
+        input_node = input if isinstance(input, StepOps) else input[0]
+        graph.add_edge(input_node, self)
+
+    @property
+    def stream(self) -> Stream:
+        """The stream of the operation."""
+        return self._stream
+
+    @property
+    def stream_list(self) -> List[Stream]:
+        return [self._stream]
+
+    @property
+    def input(self) -> Union["StepOps", Tuple["StepOps", int]]:
+        return self._input
+
+    @property
+    def input_list(self) -> List[Union["StepOps", Tuple["StepOps", int]]]:
+        return [self._input]
+
+    def stream_idx(self, idx: int) -> Stream:
+        raise NotImplementedError(
+            "Shouldn't be called for nodes that only have a single output stream"
+        )
+
+    def __str__(self):
+        cls = self.__class__.__name__
+        return f"{cls}_{self.instance_id}"
+
+    def replace_input(
+        self,
+        org_input: Union["StepOps", Tuple["StepOps", int]],
+        new_input: Union["StepOps", Tuple["StepOps", int]],
+    ):
+        if get_stream(self.input) != get_stream(new_input):
+            raise ValueError("The shape of the input stream shouldn't change")
+        self._input = new_input
+
+
+class BinaryMap(StepOps):
+    in1: Union[StepOps, Tuple[StepOps, int]]
+    in2: Union[StepOps, Tuple[StepOps, int]]
+    fn: MapFn
+    write_back_mu: bool  # whether the consumer is a bufferize or not
+    compute_bw: int
+    _stream: Stream
+
+    def __init__(
+        self,
+        graph: MultiDiGraph,
+        in1: Union[StepOps, Tuple[StepOps, int]],
+        in2: Union[StepOps, Tuple[StepOps, int]],
+        fn: MapFn,
+        write_back_mu: bool,
+        compute_bw: int,
+    ):
+
+        super().__init__()
+
+        self.in1 = in1
+        self.in2 = in2
+        self.fn = fn
+        self.write_back_mu = write_back_mu
+        self.compute_bw = compute_bw
+
+        in1_stream: Stream = get_stream(in1)
+        in2_stream: Stream = get_stream(in2)
+
+        assert (
+            in1_stream.shape == in2_stream.shape
+        ), "Input streams must have the same shape."
+
+        self._stream = Stream(
+            dtype=self.fn.apply((in1_stream.dtype, in2_stream.dtype)),
+            shape=self.in1.stream.shape,
+        )
+
+        input_node1 = in1 if isinstance(in1, StepOps) else in1[0]
+        input_node2 = in2 if isinstance(in2, StepOps) else in2[0]
+
+        graph.add_edges_from([(input_node1, self), (input_node2, self)])
+
+    @property
+    def stream(self) -> Stream:
+        """The stream of the operation."""
+        return self._stream
+
+    @property
+    def stream_list(self) -> List[Stream]:
+        return [self._stream]
+
+    @property
+    def input(self) -> Union["StepOps", Tuple["StepOps", int]]:
+        return self.in1
+
+    @property
+    def input_list(self) -> List[Union["StepOps", Tuple["StepOps", int]]]:
+        return [self.in1, self.in2]
+
+    def stream_idx(self, idx: int) -> Stream:
+        raise NotImplementedError(
+            "Shouldn't be called for nodes that only have a single output stream"
+        )
+
+    def __str__(self):
+        cls = self.__class__.__name__
+        return f"{cls}_{self.instance_id}"
+
+    def replace_input(
+        self,
+        org_input: Union["StepOps", Tuple["StepOps", int]],
+        new_input: Union["StepOps", Tuple["StepOps", int]],
+    ):
+        if self.in1 == org_input:
+            if get_stream(self.in1) != get_stream(new_input):
+                raise ValueError("The shape of the input stream shouldn't change")
+            self.in1 = new_input
+        elif self.in2 == org_input:
+            if get_stream(self.in2) != get_stream(new_input):
+                raise ValueError("The shape of the input stream shouldn't change")
+            self.in2 = new_input
+        else:
+            raise ValueError("Wrong org_input")
+
+
+class BinaryMapAccum(StepOps):
+    in1: Union[StepOps, Tuple[StepOps, int]]
+    in2: Union[StepOps, Tuple[StepOps, int]]
+    fn: MapFn
+    accum_tile_row: int
+    accum_tile_col: int
+    rank: int
+    write_back_mu: bool  # whether the consumer is a bufferize or not
+    compute_bw: int
+    _stream: Stream
+
+    # [Genghan] We need an init function?
+    def __init__(
+        self,
+        graph: MultiDiGraph,
+        in1: Union[StepOps, Tuple[StepOps, int]],
+        in2: Union[StepOps, Tuple[StepOps, int]],
+        fn: MapFn,
+        rank: int,
+        write_back_mu: bool,
+        compute_bw: int,
+    ):
+
+        super().__init__()
+
+        self.in1 = in1
+        self.in2 = in2
+        self.fn = fn
+        self.rank = rank
+        self.write_back_mu = write_back_mu
+        self.compute_bw = compute_bw
+
+        in1_stream: Stream = get_stream(in1)
+        in2_stream: Stream = get_stream(in2)
+
+        assert rank > 0, "Rank must be greater than 0."
+        assert (
+            in1_stream.shape == in2_stream.shape
+        ), "Input streams must have the same shape."
+
+        self._stream = Stream(
+            dtype=self.fn.apply((in1_stream.dtype, in2_stream.dtype)),
+            shape=self.in1.stream.shape[: -self.rank],
+        )
+
+        self.accum_tile_row = self._stream.dtype.shape[-2]
+        self.accum_tile_col = self._stream.dtype.shape[-1]
+
+        input_node1 = in1 if isinstance(in1, StepOps) else in1[0]
+        input_node2 = in2 if isinstance(in2, StepOps) else in2[0]
+
+        graph.add_edges_from([(input_node1, self), (input_node2, self)])
+
+    @property
+    def stream(self) -> Stream:
+        """The stream of the operation."""
+        return self._stream
+
+    @property
+    def stream_list(self) -> List[Stream]:
+        return [self._stream]
+
+    @property
+    def input(self) -> Union["StepOps", Tuple["StepOps", int]]:
+        return self.in1
+
+    @property
+    def input_list(self) -> List[Union["StepOps", Tuple["StepOps", int]]]:
+        return [self.in1, self.in2]
+
+    def stream_idx(self, idx: int) -> Stream:
+        raise NotImplementedError(
+            "Shouldn't be called for nodes that only have a single output stream"
+        )
+
+    def __str__(self):
+        cls = self.__class__.__name__
+        return f"{cls}_{self.instance_id}"
+
+    def replace_input(
+        self,
+        org_input: Union["StepOps", Tuple["StepOps", int]],
+        new_input: Union["StepOps", Tuple["StepOps", int]],
+    ):
+        if self.in1 == org_input:
+            if get_stream(self.in1) != get_stream(new_input):
+                raise ValueError("The shape of the input stream shouldn't change")
+            self.in1 = new_input
+        elif self.in2 == org_input:
+            if get_stream(self.in2) != get_stream(new_input):
+                raise ValueError("The shape of the input stream shouldn't change")
+            self.in2 = new_input
+        else:
+            raise ValueError("Wrong org_input")
+
+
+class Broadcast(StepOps):
+    _input: Union[StepOps, Tuple[StepOps, int]]
+    num_consumers: int
+    _stream: List[Stream]
+
+    def __init__(
+        self,
+        graph: MultiDiGraph,
+        input: Union[StepOps, Tuple[StepOps, int]],
+        num_consumers: int,
+    ):
+        super().__init__()
+
+        self._input = input
+        self.num_consumers = num_consumers
+
+        in_stream: Stream = get_stream(input)
+        self._stream = [
+            Stream(dtype=in_stream.dtype, shape=in_stream.shape)
+            for _ in range(num_consumers)
+        ]
+
+        input_node = input if isinstance(input, StepOps) else input[0]
+        graph.add_edge(input_node, self)
+
+    @property
+    def stream(self) -> Stream:
+        raise NotImplementedError(
+            "This property shouldn't be used for nodes with multiple output streams"
+        )
+
+    @property
+    def stream_list(self) -> List[Stream]:
+        return self._stream
+
+    @property
+    def input(self) -> Union["StepOps", Tuple["StepOps", int]]:
+        return self._input
+
+    @property
+    def input_list(self) -> List[Union["StepOps", Tuple["StepOps", int]]]:
+        return [self._input]
+
+    def stream_idx(self, idx: int) -> Stream:
+        return self._stream[idx]
+
+    def __str__(self):
+        cls = self.__class__.__name__
+        return f"{cls}_{self.instance_id}"
+
+    def replace_input(
+        self,
+        org_input: Union["StepOps", Tuple["StepOps", int]],
+        new_input: Union["StepOps", Tuple["StepOps", int]],
+    ):
+        if get_stream(self.input) != get_stream(new_input):
+            raise ValueError("The shape of the input stream shouldn't change")
+        self._input = new_input
+
+
+class OffChipStore(StepOps):
+    _input: Union[StepOps, Tuple[StepOps, int]]
+    tensor_shape_tiled: Tuple[int, ...]
+    tile_row: int
+    tile_col: int
+    store_file_name: str  # This should not include the file extension!!
+    par_dispatch: int
+
+    def __init__(
+        self,
+        graph: MultiDiGraph,
+        input: Union[StepOps, Tuple[StepOps, int]],
+        par_dispatch: int,
+        store_file_name: str = "output.npy",
+    ):
+        super().__init__()
+
+        self._input = input
+        self.tensor_shape_tiled = input.stream.shape
+        self.tile_row = input.stream.dtype.shape[0]
+        self.tile_col = input.stream.dtype.shape[1]
+        self.store_file_name = store_file_name
+        self.par_dispatch = par_dispatch
+
+        input_node = input if isinstance(input, StepOps) else input[0]
+        graph.add_edge(input_node, self)
+
+    @property
+    def stream(self) -> Stream:
+        raise NotImplementedError("OffChipStore does not have a stream property.")
+
+    @property
+    def stream_list(self) -> List[Stream]:
+        raise NotImplementedError("OffChipStore does not have a stream property.")
+
+    @property
+    def input(self) -> Union["StepOps", Tuple["StepOps", int]]:
+        return self._input
+
+    @property
+    def input_list(self) -> List[Union["StepOps", Tuple["StepOps", int]]]:
+        return [self._input]
+
+    def stream_idx(self, idx: int) -> Stream:
+        raise NotImplementedError(
+            "Shouldn't be called for nodes without an output stream"
+        )
+
+    def get_untiled_shape(self) -> Tuple[int, ...]:
+        """Get the un-tiled shape of the tensor."""
+        return self.tensor_shape_tiled[:-2] + (
+            self.tensor_shape_tiled[-2] * self.tile_row,
+            self.tensor_shape_tiled[-1] * self.tile_col,
+        )
+
+    def __str__(self):
+        cls = self.__class__.__name__
+        return f"{cls}_{self.instance_id}"
+
+    def replace_input(
+        self,
+        org_input: Union["StepOps", Tuple["StepOps", int]],
+        new_input: Union["StepOps", Tuple["StepOps", int]],
+    ):
+        if get_stream(self.input) != get_stream(new_input):
+            raise ValueError("The shape of the input stream shouldn't change")
+        self._input = new_input
+
+
+class Bufferize(StepOps):
+    _input: Union[StepOps, Tuple[StepOps, int]]
+    rank: int
+    _stream: Stream
+
+    def __init__(
+        self, graph: MultiDiGraph, input: Union[StepOps, Tuple[StepOps, int]], rank: int
+    ):
+        super().__init__()
+
+        self._input = input
+        self.rank = rank
+
+        in_stream: Stream = get_stream(input)
+        assert isinstance(in_stream.dtype, Tile), "Input stream must be a Tile type."
+
+        buffer_shape = tuple(in_stream.shape[-rank:])
+        self._stream = Stream(
+            dtype=Buffer(in_stream.dtype, buffer_shape),
+            shape=in_stream.shape[: -self.rank],
+        )
+
+        input_node = input if isinstance(input, StepOps) else input[0]
+        graph.add_edge(input_node, self)
+
+    @property
+    def stream(self) -> Stream:
+        """The stream of the operation."""
+        return self._stream
+
+    @property
+    def stream_list(self) -> List[Stream]:
+        return [self._stream]
+
+    @property
+    def input(self) -> Union["StepOps", Tuple["StepOps", int]]:
+        return self._input
+
+    @property
+    def input_list(self) -> List[Union["StepOps", Tuple["StepOps", int]]]:
+        return [self._input]
+
+    def stream_idx(self, idx: int) -> Stream:
+        raise NotImplementedError(
+            "Shouldn't be called for nodes that only have a single output stream"
+        )
+
+    def __str__(self):
+        cls = self.__class__.__name__
+        return f"{cls}_{self.instance_id}"
+
+    def replace_input(
+        self,
+        org_input: Union["StepOps", Tuple["StepOps", int]],
+        new_input: Union["StepOps", Tuple["StepOps", int]],
+    ):
+        if get_stream(self.input) != get_stream(new_input):
+            raise ValueError("The shape of the input stream shouldn't change")
+        self._input = new_input
+
+
+class Streamify(StepOps):
+    _input: Union[StepOps, Tuple[StepOps, int]]
+    repeat_factor: List[int]
+    rank: int
+    _stream: Stream
+
+    def __init__(
+        self,
+        graph: MultiDiGraph,
+        input: Union[StepOps, Tuple[StepOps, int]],
+        repeat_factor: List[int],
+        rank: int, # The rank of the Buffer
+    ):
+        super().__init__()
+
+        self._input = input
+        self.repeat_factor = repeat_factor
+        self.rank = rank
+
+        in_stream: Stream = get_stream(input)
+        assert isinstance(
+            in_stream.dtype, Buffer
+        ), "Input stream must be a Buffer type."
+
+        buffer_shape = in_stream.dtype.shape
+        buffer_dtype = in_stream.dtype.dtype
+        self._stream = Stream(
+            dtype=buffer_dtype,
+            shape=in_stream.shape + tuple(repeat_factor) + buffer_shape,
+        )
+
+        input_node = input if isinstance(input, StepOps) else input[0]
+        graph.add_edge(input_node, self)
+
+    @property
+    def stream(self) -> Stream:
+        """The stream of the operation."""
+        return self._stream
+
+    @property
+    def stream_list(self) -> List[Stream]:
+        return [self._stream]
+
+    @property
+    def input(self) -> Union["StepOps", Tuple["StepOps", int]]:
+        return self._input
+
+    @property
+    def input_list(self) -> List[Union["StepOps", Tuple["StepOps", int]]]:
+        return [self._input]
+
+    def stream_idx(self, idx: int) -> Stream:
+        raise NotImplementedError(
+            "Shouldn't be called for nodes that only have a single output stream"
+        )
+
+    def __str__(self):
+        cls = self.__class__.__name__
+        return f"{cls}_{self.instance_id}"
+
+    def replace_input(
+        self,
+        org_input: Union["StepOps", Tuple["StepOps", int]],
+        new_input: Union["StepOps", Tuple["StepOps", int]],
+    ):
+        if get_stream(self.input) != get_stream(new_input):
+            raise ValueError("The shape of the input stream shouldn't change")
+        self._input = new_input
+
+
+class DynStreamify(StepOps):
+    _input: Union[StepOps, Tuple[StepOps, int]]
+    ref: Union[StepOps, Tuple[StepOps, int]]
+    repeat_rank: int
+    bufferized_rank: int
+    _stream: Stream
+
+    # There is an ExpandRef hidden in the operation
+    def __init__(
+        self,
+        graph: MultiDiGraph,
+        input: Union[StepOps, Tuple[StepOps, int]],
+        ref: Union[StepOps, Tuple[StepOps, int]],
+        repeat_rank: int,
+        bufferized_rank: int,
+    ):
+        super().__init__()
+
+        self._input = input
+        self.ref = ref
+        self.repeat_rank = repeat_rank
+        self.bufferized_rank = bufferized_rank
+
+        in_stream: Stream = get_stream(input)
+        ref_stream: Stream = get_stream(ref)
+
+        assert (
+            in_stream.shape[: -self.repeat_rank] == ref_stream.shape[: -self.repeat_rank]
+        ), "Input stream shape must match the reference stream shape up to the repeat rank."
+
+        assert (
+            in_stream.shape[-self.repeat_rank:] == [1] * self.repeat_rank
+        ), "Input stream shape must have 1s in the repeat rank dimensions."
+
+        assert isinstance(
+            in_stream.dtype, Buffer
+        ), "Input stream must be a Buffer type."
+
+        buffer_shape = in_stream.dtype.shape
+        buffer_dtype = in_stream.dtype.dtype
+
+        self._stream = Stream(dtype=buffer_dtype, shape=ref_stream.shape + buffer_shape)
+
+        input_node = input if isinstance(input, StepOps) else input[0]
+        graph.add_edge(input_node, self)
+
+        ref_node = ref if isinstance(ref, StepOps) else ref[0]
+        graph.add_edge(ref_node, self)
+
+    @property
+    def stream(self) -> Stream:
+        """The stream of the operation."""
+        return self._stream
+
+    @property
+    def stream_list(self) -> List[Stream]:
+        return [self._stream]
+
+    @property
+    def input(self) -> Union["StepOps", Tuple["StepOps", int]]:
+        return self._input
+
+    @property
+    def input_list(self) -> List[Union["StepOps", Tuple["StepOps", int]]]:
+        return [self._input, self.ref]
+
+    def stream_idx(self, idx: int) -> Stream:
+        raise NotImplementedError(
+            "Shouldn't be called for nodes that only have a single output stream"
+        )
+
+    def __str__(self):
+        cls = self.__class__.__name__
+        return f"{cls}_{self.instance_id}"
+
+    def replace_input(
+        self,
+        org_input: Union["StepOps", Tuple["StepOps", int]],
+        new_input: Union["StepOps", Tuple["StepOps", int]],
+    ):
+        if self._input == org_input:
+            if get_stream(self._input) != get_stream(new_input):
+                raise ValueError("The shape of the input stream shouldn't change")
+            self._input = new_input
+        elif self.ref == org_input:
+            if get_stream(self.ref) != get_stream(new_input):
+                raise ValueError("The shape of the ref stream shouldn't change")
+            self.ref = new_input
+        else:
+            raise ValueError("Wrong org_input")
+
+
+class FlatPartition(StepOps):
+    _input: Union[StepOps, Tuple[StepOps, int]]
+    control: Union[StepOps, Tuple[StepOps, int]]
+    num_consumers: int
+    partition_rank: int
+    switch_cycles: List[int]
+    write_back_mu: bool
+    _stream: List[Stream]
+
+    def __init__(
+        self,
+        graph: MultiDiGraph,
+        input: Union[StepOps, Tuple[StepOps, int]],
+        control: Union[StepOps, Tuple[StepOps, int]],
+        partition_rank: int,
+        switch_cycles: List[int],
+        write_back_mu: bool,
+        num_consumers: int,
+    ):
+        super().__init__()
+
+        self._input = input
+        self.control = control
+        self.num_consumers = num_consumers
+        self.partition_rank = partition_rank
+        self.switch_cycles = switch_cycles
+        self.write_back_mu = write_back_mu
+
+        in_stream: Stream = get_stream(input)
+        control_stream: Stream = get_stream(control)
+        new_names = sympy.symbols(f"{str(self)}_0:{num_consumers}")
+        self._stream = [
+            Stream(
+                dtype=in_stream.dtype,
+                shape=[new_names[i]] + in_stream.shape[-partition_rank:],
+            )
+            for i in range(num_consumers)
+        ]
+
+        input_node = input if isinstance(input, StepOps) else input[0]
+        control_node = control if isinstance(control, StepOps) else control[0]
+        graph.add_edge(input_node, self)
+        graph.add_edge(control_node, self)
+
+    @property
+    def stream(self) -> Stream:
+        raise NotImplementedError(
+            "This property shouldn't be used for nodes with multiple output streams"
+        )
+
+    @property
+    def stream_list(self) -> List[Stream]:
+        return self._stream
+
+    @property
+    def input(self) -> Union["StepOps", Tuple["StepOps", int]]:
+        return self._input
+
+    @property
+    def input_list(self) -> List[Union["StepOps", Tuple["StepOps", int]]]:
+        return [self._input, self.control]
+
+    def stream_idx(self, idx: int) -> Stream:
+        return self._stream[idx]
+
+    def __str__(self):
+        cls = self.__class__.__name__
+        return f"{cls}_{self.instance_id}"
+
+    def replace_input(
+        self,
+        org_input: Union["StepOps", Tuple["StepOps", int]],
+        new_input: Union["StepOps", Tuple["StepOps", int]],
+    ):
+        if self.input == org_input:
+            if get_stream(self.input) != get_stream(new_input):
+                raise ValueError("The shape of the input stream shouldn't change")
+            self._input = new_input
+        elif self.control == org_input:
+            if get_stream(self.control) != get_stream(new_input):
+                raise ValueError("The shape of the input stream shouldn't change")
+            self.control = new_input
+        else:
+            raise ValueError("Wrong org_input")
+
+class FlatReassemble(StepOps):
+    _inputs: List[Union[StepOps, Tuple[StepOps, int]]]
+    control: Union[StepOps, Tuple[StepOps, int]]
+    in_stream_rank: int
+    switch_cycles: List[int]
+    write_back_mu: bool
+    _stream: List[Stream]
+
+    def __init__(
+        self,
+        graph: MultiDiGraph,
+        inputs: List[Union[StepOps, Tuple[StepOps, int]]],
+        control: Union[StepOps, Tuple[StepOps, int]],
+        in_stream_rank: int,
+        switch_cycles: List[int],
+        write_back_mu: bool,
+    ):
+        super().__init__()
+
+        self._inputs = inputs
+        self.control = control
+        self.in_stream_rank = in_stream_rank
+        self.switch_cycles = switch_cycles
+        self.write_back_mu = write_back_mu
+
+        in_streams = [get_stream(input) for input in inputs]
+        assert all(
+            stream.shape[-in_stream_rank:] == in_streams[0].shape[-in_stream_rank:]
+            for stream in in_streams
+        ), "All input streams must have the same shape for the last 'in_stream_rank' dimensions."
+        control_stream: Stream = get_stream(control)
+        new_name = sympy.Symbol(f"{str(self)}_dyn")
+        self._stream = Stream(
+            dtype=in_streams[0].dtype,
+            shape=control_stream.shape + (new_name,) + in_streams[0].shape[-in_stream_rank:]
+        )
+
+        for input_node in inputs:
+            node = input_node if isinstance(input_node, StepOps) else input_node[0]
+            graph.add_edge(node, self)
+
+        control_node = control if isinstance(control, StepOps) else control[0]
+        graph.add_edge(control_node, self)
+
+
+class UnaryMap(StepOps):
+    input: Union[StepOps, Tuple[StepOps, int]]
+    fn: MapFn
+    write_back_mu: bool  # whether the consumer is a bufferize or not
+    compute_bw: int
+    _stream: Stream
+
+    def __init__(
+        self,
+        graph: MultiDiGraph,
+        input: Union[StepOps, Tuple[StepOps, int]],
+        fn: MapFn,
+        write_back_mu: bool,
+        compute_bw: int,
+    ):
+        super().__init__()
+
+        self.input = input
+        self.fn = fn
+        self.write_back_mu = write_back_mu
+        self.compute_bw = compute_bw
+
+        in_stream: Stream = get_stream(input)
+
+        self._stream = Stream(
+            dtype=self.fn.apply((in_stream.dtype,)),
+            shape=in_stream.shape,
+        )
+
+        input_node = input if isinstance(input, StepOps) else input[0]
+        graph.add_edge(input_node, self)
+
+class ExpandRef(StepOps):
+    _input: Union[StepOps, Tuple[StepOps, int]]
+    ref: Union[StepOps, Tuple[StepOps, int]]
+    _stream: Stream
+
+    def __init__(
+        self,
+        graph: MultiDiGraph,
+        input: Union[StepOps, Tuple[StepOps, int]],
+        ref: Union[StepOps, Tuple[StepOps, int]],
+    ):
+        super().__init__()
+
+        self._input = input
+        self.ref = ref
+
+        in_stream: Stream = get_stream(input)
+        ref_stream: Stream = get_stream(ref)
+
+        assert in_stream.shape[:-1] == ref_stream.shape[:-1]
+        assert in_stream[-1] == 1
+        self._stream = Stream(
+            dtype=in_stream.dtype,
+            shape=ref_stream
+        )
+
+        input_node = input if isinstance(input, StepOps) else input[0]
+        graph.add_edge(input_node, self)
+        ref_node = ref if isinstance(ref, StepOps) else ref[0]
+        graph.add_edge(ref_node, self)
+        
