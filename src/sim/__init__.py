@@ -2,7 +2,7 @@ from dataclasses import dataclass
 from typing import List, Tuple
 from step_py.ops import *
 from step_py.utility_ops import *
-from step_py.functions import map_fn
+from step_py.functions import map_fn, init_fn
 from proto import datatype_pb2, func_pb2, graph_pb2, ops_pb2
 from step_py.datatype import *
 import numpy as np
@@ -44,6 +44,18 @@ def to_pb_elem_to_elem_func(op_fn: map_fn.MapFn) -> func_pb2.ElemtoElemFunc:
         raise NotImplementedError(
             f"Function {op_fn} is not implemented for serialization."
         )
+    return func_pb
+
+
+def to_pb_init_func(op_fn: init_fn.InitFn) -> func_pb2.InitFunc:
+    func_pb = func_pb2.InitFunc()
+    if isinstance(op_fn, init_fn.Zero):
+        func_pb.zero.CopyFrom(func_pb2.Zero())
+    else:
+        raise NotImplementedError(
+            f"Function {op_fn} is not implemented for serialization."
+        )
+
     return func_pb
 
 
@@ -198,14 +210,28 @@ def serialize(graph: MultiDiGraph, protobuf_file: str):
             else:
                 binarymap_pb.input_id2 = op.in2.instance_id
 
-            func_pb = func_pb2.ElemtoElemFunc()
-            if isinstance(op.fn, map_fn.Matmul):
-                map_fn_pb = func_pb2.Matmul()
-                map_fn_pb.weight_transpose = op.fn.weight_transposed
-                func_pb.matmul.CopyFrom(map_fn_pb)
+            binarymap_pb.func.CopyFrom(to_pb_elem_to_elem_func(op.fn))
+
+            binarymap_pb.compute_bw = op.compute_bw
+            binarymap_pb.write_back_mu = op.write_back_mu
+
+            binarymap_pb.dtype_b.CopyFrom(to_pb_datatype(op.stream.stream_dtype))
+
+            operator.binarymap.CopyFrom(binarymap_pb)
+        elif isinstance(op, UnaryMap):
+            binarymap_pb = ops_pb2.UnaryMap()
+
+            if isinstance(op.input, Tuple):
+                input_node, idx = op.innput
+                binarymap_pb.stream_idx = idx
+                binarymap_pb.input_id = input_node.instance_id
+                binarymap_pb.dtype_a.CopyFrom(
+                    to_pb_datatype(input_node.stream_idx(idx).stream_dtype)
+                )
             else:
-                raise NotImplementedError(
-                    f"Function {op.fn} is not implemented for serialization."
+                binarymap_pb.input_id = op.input.instance_id
+                binarymap_pb.dtype_a.CopyFrom(
+                    to_pb_datatype(op.input.stream.stream_dtype)
                 )
 
             binarymap_pb.func.CopyFrom(to_pb_elem_to_elem_func(op.fn))
@@ -215,7 +241,7 @@ def serialize(graph: MultiDiGraph, protobuf_file: str):
 
             binarymap_pb.dtype_b.CopyFrom(to_pb_datatype(op.stream.stream_dtype))
 
-            operator.binarymap.CopyFrom(binarymap_pb)
+            operator.unarymap.CopyFrom(binarymap_pb)
         elif isinstance(op, Bufferize):
             bufferize_pb = ops_pb2.Bufferize()
 
@@ -299,8 +325,9 @@ def serialize(graph: MultiDiGraph, protobuf_file: str):
                 binarymapaccum_pb.input_id2 = op.in2.instance_id
 
             binarymapaccum_pb.func.CopyFrom(to_pb_elem_to_elem_func(op.fn))
-            binarymapaccum_pb.tile_row = op.accum_tile_row
-            binarymapaccum_pb.tile_col = op.accum_tile_col
+            binarymapaccum_pb.init_func.CopyFrom(to_pb_init_func(op.init_fn))
+            binarymapaccum_pb.tile_row = op.init_fn.apply().shape[0]
+            binarymapaccum_pb.tile_col = op.init_fn.apply().shape[1]
             binarymapaccum_pb.rank = op.rank
             binarymapaccum_pb.compute_bw = op.compute_bw
             binarymapaccum_pb.write_back_mu = op.write_back_mu
@@ -308,6 +335,33 @@ def serialize(graph: MultiDiGraph, protobuf_file: str):
             binarymapaccum_pb.dtype_b.CopyFrom(to_pb_datatype(op.stream.stream_dtype))
 
             operator.binarymap_accum.CopyFrom(binarymapaccum_pb)
+        elif isinstance(op, Accum):
+            accum_pb = ops_pb2.Accum()
+
+            if isinstance(op.input, Tuple):
+                input_node, idx = op.input
+                accum_pb.stream_idx = idx
+                accum_pb.input_id = input_node.instance_id
+                accum_pb.dtype_a.CopyFrom(
+                    to_pb_datatype(input_node.stream_idx(idx).stream_dtype)
+                )
+            else:
+                accum_pb.input_id = op.input.instance_id
+                accum_pb.dtype_a.CopyFrom(to_pb_datatype(op.input.stream.stream_dtype))
+
+            accum_pb.func.CopyFrom(to_pb_elem_to_elem_func(op.fn))
+            accum_pb.init_func.CopyFrom(to_pb_init_func(op.init_fn))
+
+            accum_row, accum_col = op.init_fn.apply().shape
+            accum_pb.tile_row = accum_row
+            accum_pb.tile_col = accum_col
+            accum_pb.rank = op.accum_rank
+            accum_pb.compute_bw = op.compute_bw
+            accum_pb.write_back_mu = op.write_back_mu
+
+            accum_pb.dtype_b.CopyFrom(to_pb_datatype(op.stream.stream_dtype))
+
+            operator.accum.CopyFrom(accum_pb)
         elif isinstance(op, RepeatStatic):
             repeatstatic_pb = ops_pb2.RepeatStatic()
 

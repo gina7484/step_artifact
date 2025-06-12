@@ -2,6 +2,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 import torch
 from typing import List, Tuple, Union
+from step_py.functions.init_fn import InitFn
 from step_py.functions.map_fn import MapFn
 from step_py.datatype import Buffer, Stream, Tile, Select, Float16, Float32
 from networkx import MultiDiGraph
@@ -483,8 +484,7 @@ class BinaryMapAccum(StepOps):
     in1: Union[StepOps, Tuple[StepOps, int]]
     in2: Union[StepOps, Tuple[StepOps, int]]
     fn: MapFn
-    accum_tile_row: int
-    accum_tile_col: int
+    init_fn: InitFn
     rank: int
     write_back_mu: bool  # whether the consumer is a bufferize or not
     compute_bw: int
@@ -497,6 +497,7 @@ class BinaryMapAccum(StepOps):
         in1: Union[StepOps, Tuple[StepOps, int]],
         in2: Union[StepOps, Tuple[StepOps, int]],
         fn: MapFn,
+        init_fn: InitFn,
         rank: int,
         write_back_mu: bool,
         compute_bw: int,
@@ -507,6 +508,7 @@ class BinaryMapAccum(StepOps):
         self.in1 = in1
         self.in2 = in2
         self.fn = fn
+        self.init_fn = init_fn
         self.rank = rank
         self.write_back_mu = write_back_mu
         self.compute_bw = compute_bw
@@ -525,9 +527,6 @@ class BinaryMapAccum(StepOps):
             ),
             shape=self.in1.stream.shape[: -self.rank],
         )
-
-        self.accum_tile_row = self._stream.stream_dtype.shape[-2]
-        self.accum_tile_col = self._stream.stream_dtype.shape[-1]
 
         input_node1 = in1 if isinstance(in1, StepOps) else in1[0]
         input_node2 = in2 if isinstance(in2, StepOps) else in2[0]
@@ -1188,9 +1187,11 @@ class UnaryMap(StepOps):
             raise ValueError("The shape of the input stream shouldn't change")
         self._input = new_input
 
+
 class Accum(StepOps):
     _input: Union[StepOps, Tuple[StepOps, int]]
     fn: MapFn
+    init_fn: InitFn
     accum_rank: int
     write_back_mu: bool
     compute_bw: int
@@ -1202,6 +1203,7 @@ class Accum(StepOps):
         input: Union[StepOps, Tuple[StepOps, int]],
         output_stream_dtype: Union[Tile, Buffer, Select],
         fn: MapFn,
+        init_fn: InitFn,
         accum_rank: int,
         write_back_mu: bool,
         compute_bw: int,
@@ -1210,14 +1212,21 @@ class Accum(StepOps):
 
         self._input = input
         self.fn = fn
+        self.init_fn = init_fn
         self.accum_rank = accum_rank
         self.write_back_mu = write_back_mu
         self.compute_bw = compute_bw
 
         in_stream: Stream = get_stream(input)
         assert accum_rank > 0, "Accum rank must be greater than 0."
+        out_dtype = self.fn.apply((in_stream.stream_dtype, output_stream_dtype))
+        accum_dtype = self.init_fn.apply()
+        assert (
+            out_dtype == accum_dtype
+        ), f"Output stream dtype {out_dtype} must match the accumulated dtype {accum_dtype}."
+
         self._stream = Stream(
-            stream_dtype=self.fn.apply((in_stream.stream_dtype, output_stream_dtype)),
+            stream_dtype=out_dtype,
             shape=in_stream.shape[: -self.accum_rank],
         )
 
