@@ -485,8 +485,6 @@ class BinaryMapAccum(StepOps):
     in2: Union[StepOps, Tuple[StepOps, int]]
     fn: MapFn
     init_fn: InitFn
-    accum_tile_row: int
-    accum_tile_col: int
     rank: int
     write_back_mu: bool  # whether the consumer is a bufferize or not
     compute_bw: int
@@ -529,9 +527,6 @@ class BinaryMapAccum(StepOps):
             ),
             shape=self.in1.stream.shape[: -self.rank],
         )
-
-        self.accum_tile_row = self._stream.stream_dtype.shape[-2]
-        self.accum_tile_col = self._stream.stream_dtype.shape[-1]
 
         input_node1 = in1 if isinstance(in1, StepOps) else in1[0]
         input_node2 = in2 if isinstance(in2, StepOps) else in2[0]

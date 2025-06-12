@@ -326,8 +326,8 @@ def serialize(graph: MultiDiGraph, protobuf_file: str):
 
             binarymapaccum_pb.func.CopyFrom(to_pb_elem_to_elem_func(op.fn))
             binarymapaccum_pb.init_func.CopyFrom(to_pb_init_func(op.init_fn))
-            binarymapaccum_pb.tile_row = op.accum_tile_row
-            binarymapaccum_pb.tile_col = op.accum_tile_col
+            binarymapaccum_pb.tile_row = op.init_fn.apply().shape[0]
+            binarymapaccum_pb.tile_col = op.init_fn.apply().shape[1]
             binarymapaccum_pb.rank = op.rank
             binarymapaccum_pb.compute_bw = op.compute_bw
             binarymapaccum_pb.write_back_mu = op.write_back_mu
