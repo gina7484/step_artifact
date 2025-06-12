@@ -373,6 +373,45 @@ def serialize(graph: MultiDiGraph, protobuf_file: str):
             flatpartition_pb.write_back_mu = op.write_back_mu
 
             operator.flat_partition.CopyFrom(flatpartition_pb)
+        elif isinstance(op, FlatReassemble):
+            flatreassemble_pb = ops_pb2.FlatReassemble()
+
+            input_id_list = []
+            stream_idx_list = []
+            for input_stream in op._inputs:
+                if isinstance(input_stream, Tuple):
+                    input_node, idx = input_stream
+                    input_id_list.append(input_node.instance_id)
+                    stream_idx_list.append(idx)
+                else:
+                    input_id_list.append(input_stream.instance_id)
+                    stream_idx_list.append(-1)
+
+            flatreassemble_pb.input_id_list.extend(input_id_list)
+            flatreassemble_pb.input_stream_idx_list.extend(stream_idx_list)
+
+            if isinstance(op.control, Tuple):
+                control_node, idx = op.control
+                flatreassemble_pb.control_stream_idx = idx
+                flatreassemble_pb.control_id = control_node.instance_id
+                flatreassemble_pb.control_dtype.CopyFrom(
+                    to_pb_datatype(control_node.stream_idx(idx).stream_dtype)
+                )
+
+            else:
+                flatreassemble_pb.control_id = op.control.instance_id
+                flatreassemble_pb.control_dtype.CopyFrom(
+                    to_pb_datatype(op.control.stream.stream_dtype)
+                )
+
+            flatreassemble_pb.reassemble_rank = op.reassemble_rank
+            flatreassemble_pb.switch_cycles.extend(list(op.switch_cycles))
+            flatreassemble_pb.write_back_mu = op.write_back_mu
+            flatreassemble_pb.input_dtype.CopyFrom(
+                to_pb_datatype(op.stream.stream_dtype)
+            )
+
+            operator.flat_reassemble.CopyFrom(flatreassemble_pb)
         elif isinstance(op, Promote):
             promote_pb = ops_pb2.Promote()
 
@@ -388,6 +427,22 @@ def serialize(graph: MultiDiGraph, protobuf_file: str):
             promote_pb.dtype.CopyFrom(to_pb_datatype(op.stream.stream_dtype))
 
             operator.promote.CopyFrom(promote_pb)
+        elif isinstance(op, Flatten):
+            flatten_pb = ops_pb2.Flatten()
+
+            flatten_pb.input_id = op.input.instance_id
+            if isinstance(op.input, Tuple):
+                input_node, idx = op.input
+                flatten_pb.stream_idx = idx
+                flatten_pb.input_id = input_node.instance_id
+            else:
+                flatten_pb.input_id = op.input.instance_id
+
+            flatten_pb.min_rank = op.min_rank
+            flatten_pb.max_rank = op.max_rank
+            flatten_pb.dtype.CopyFrom(to_pb_datatype(op.stream.stream_dtype))
+
+            operator.flatten.CopyFrom(flatten_pb)
         elif isinstance(op, SelectGen):
             selectgen_pb = ops_pb2.SelectGen()
 

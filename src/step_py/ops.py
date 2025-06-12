@@ -688,8 +688,7 @@ class OffChipStore(StepOps):
     def get_untiled_shape(self) -> Tuple[int, ...]:
         """Get the un-tiled shape of the tensor."""
         if len(self.tensor_shape_tiled) == 1:
-            return (self.tensor_shape_tiled[-1] * self.tile_row,
-                    self.tile_col)
+            return (self.tensor_shape_tiled[-1] * self.tile_row, self.tile_col)
         else:
             return self.tensor_shape_tiled[:-2] + (
                 self.tensor_shape_tiled[-2] * self.tile_row,
@@ -1272,7 +1271,7 @@ class Flatten(StepOps):
         graph: MultiDiGraph,
         input: Union[StepOps, Tuple[StepOps, int]],
         min_rank: int,
-        max_rank: int
+        max_rank: int,
     ):
         super().__init__()
         self._input = input
@@ -1294,19 +1293,19 @@ class Flatten(StepOps):
         # Convert ranks to indices (rank 0 = rightmost = highest index)
         min_index = len(shape) - 1 - max_rank  # Note: max_rank gives min_index
         max_index = len(shape) - 1 - min_rank  # Note: min_rank gives max_index
-        
+
         # Validate indices
         if min_index < 0 or max_index >= len(shape) or min_index > max_index:
             raise ValueError("Invalid rank range")
-        
+
         # Calculate merged dimension
         merged_dim = 1
         for i in range(min_index, max_index + 1):
             merged_dim *= shape[i]
-        
+
         # Build new shape
-        new_shape = shape[:min_index] + (merged_dim,) + shape[max_index + 1:]
-        
+        new_shape = shape[:min_index] + (merged_dim,) + shape[max_index + 1 :]
+
         return new_shape
 
     @property
