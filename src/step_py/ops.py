@@ -688,8 +688,7 @@ class OffChipStore(StepOps):
     def get_untiled_shape(self) -> Tuple[int, ...]:
         """Get the un-tiled shape of the tensor."""
         if len(self.tensor_shape_tiled) == 1:
-            return (self.tensor_shape_tiled[-1] * self.tile_row,
-                    self.tile_col)
+            return (self.tensor_shape_tiled[-1] * self.tile_row, self.tile_col)
         else:
             return self.tensor_shape_tiled[:-2] + (
                 self.tensor_shape_tiled[-2] * self.tile_row,
@@ -1031,7 +1030,7 @@ class FlatPartition(StepOps):
 class FlatReassemble(StepOps):
     _inputs: List[Union[StepOps, Tuple[StepOps, int]]]
     control: Union[StepOps, Tuple[StepOps, int]]
-    in_stream_rank: int
+    reassemble_rank: int
     switch_cycles: List[int]
     write_back_mu: bool
     _stream: Stream
@@ -1041,7 +1040,7 @@ class FlatReassemble(StepOps):
         graph: MultiDiGraph,
         inputs: List[Union[StepOps, Tuple[StepOps, int]]],
         control: Union[StepOps, Tuple[StepOps, int]],
-        in_stream_rank: int,  # Remove dimensions at rank larger or equal to this value
+        reassemble_rank: int,  # Remove dimensions at rank larger or equal to this value
         switch_cycles: List[int],
         write_back_mu: bool,
     ):
@@ -1049,23 +1048,23 @@ class FlatReassemble(StepOps):
 
         self._inputs = inputs
         self.control = control
-        self.in_stream_rank = in_stream_rank
+        self.reassemble_rank = reassemble_rank
         self.switch_cycles = switch_cycles
         self.write_back_mu = write_back_mu
 
         in_streams = [get_stream(input) for input in inputs]
         assert all(
-            stream.shape[len(stream.shape) - in_stream_rank :]
-            == in_streams[0].shape[len(in_streams[0].shape) - in_stream_rank :]
+            stream.shape[len(stream.shape) - reassemble_rank :]
+            == in_streams[0].shape[len(in_streams[0].shape) - reassemble_rank :]
             for stream in in_streams
-        ), "All input streams must have the same shape for the last 'in_stream_rank' dimensions."
+        ), "All input streams must have the same shape for the last 'reassemble_rank' dimensions."
         control_stream: Stream = get_stream(control)
         new_name = sympy.Symbol(f"{str(self)}_dyn")
         self._stream = Stream(
             stream_dtype=in_streams[0].stream_dtype,
             shape=control_stream.shape
             + (new_name,)
-            + in_streams[0].shape[len(in_streams[0].shape) - in_stream_rank :],
+            + in_streams[0].shape[len(in_streams[0].shape) - reassemble_rank :],
         )
 
         for input_node in inputs:
@@ -1344,7 +1343,7 @@ class Flatten(StepOps):
         graph: MultiDiGraph,
         input: Union[StepOps, Tuple[StepOps, int]],
         min_rank: int,
-        max_rank: int
+        max_rank: int,
     ):
         super().__init__()
         self._input = input
@@ -1366,19 +1365,19 @@ class Flatten(StepOps):
         # Convert ranks to indices (rank 0 = rightmost = highest index)
         min_index = len(shape) - 1 - max_rank  # Note: max_rank gives min_index
         max_index = len(shape) - 1 - min_rank  # Note: min_rank gives max_index
-        
+
         # Validate indices
         if min_index < 0 or max_index >= len(shape) or min_index > max_index:
             raise ValueError("Invalid rank range")
-        
+
         # Calculate merged dimension
         merged_dim = 1
         for i in range(min_index, max_index + 1):
             merged_dim *= shape[i]
-        
+
         # Build new shape
-        new_shape = shape[:min_index] + (merged_dim,) + shape[max_index + 1:]
-        
+        new_shape = shape[:min_index] + (merged_dim,) + shape[max_index + 1 :]
+
         return new_shape
 
     @property

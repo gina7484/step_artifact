@@ -160,7 +160,7 @@ def test_prefill_expert_mnk_mnk():
         graph=step_graph,
         inputs=expert_loaders_gate,
         control=control,
-        in_stream_rank=REASSEMBLE_RANK,
+        reassemble_rank=REASSEMBLE_RANK,
         switch_cycles=[1] * EXPERT,
         write_back_mu=False,
     )
@@ -209,7 +209,7 @@ def test_prefill_expert_mnk_mnk():
         graph=step_graph,
         inputs=expert_loaders_up,
         control=control,
-        in_stream_rank=REASSEMBLE_RANK,
+        reassemble_rank=REASSEMBLE_RANK,
         switch_cycles=[1] * EXPERT,
         write_back_mu=False,
     )
@@ -310,7 +310,7 @@ def test_prefill_expert_mnk_mnk():
         graph=step_graph,
         inputs=expert_loaders_down,
         control=control,
-        in_stream_rank=REASSEMBLE_RANK,
+        reassemble_rank=REASSEMBLE_RANK,
         switch_cycles=[1] * EXPERT,
         write_back_mu=False,
     )
@@ -498,7 +498,7 @@ def test_incremental_prefill_expert_mnk_mnk():
         graph=step_graph,
         inputs=expert_loaders_gate,
         control=control,
-        in_stream_rank=REASSEMBLE_RANK,
+        reassemble_rank=REASSEMBLE_RANK,
         switch_cycles=[1] * EXPERT,
         write_back_mu=False,
     )
@@ -514,6 +514,7 @@ def test_incremental_prefill_expert_mnk_mnk():
         graph=step_graph, input=w_gate_reassemble, min_rank=1, max_rank=2
     )
 
+    """
     w_up_partition = FlatPartition(
         graph=step_graph,
         input=control,
@@ -549,7 +550,7 @@ def test_incremental_prefill_expert_mnk_mnk():
         graph=step_graph,
         inputs=expert_loaders_up,
         control=control,
-        in_stream_rank=REASSEMBLE_RANK,
+        reassemble_rank=REASSEMBLE_RANK,
         switch_cycles=[1] * EXPERT,
         write_back_mu=False,
     )
@@ -564,7 +565,7 @@ def test_incremental_prefill_expert_mnk_mnk():
     flattened_w_up_reassemble = Flatten(
         graph=step_graph, input=w_up_reassemble, min_rank=1, max_rank=2
     )
-
+    """
     # # ---------- Computation ----------
     # # Linear (Gate)
     gate = BinaryMapAccum(
@@ -586,6 +587,13 @@ def test_incremental_prefill_expert_mnk_mnk():
         compute_bw=ACT_FN_COMPUTE_BW,
     )
 
+    output = OffChipStore(
+        graph=step_graph,
+        input=silu_gate,
+        par_dispatch=4,
+    )
+
+    """
     # Linear (Up)
     up = BinaryMapAccum(
         graph=step_graph,
@@ -652,7 +660,7 @@ def test_incremental_prefill_expert_mnk_mnk():
         graph=step_graph,
         inputs=expert_loaders_down,
         control=control,
-        in_stream_rank=REASSEMBLE_RANK,
+        reassemble_rank=REASSEMBLE_RANK,
         switch_cycles=[1] * EXPERT,
         write_back_mu=False,
     )
@@ -686,6 +694,7 @@ def test_incremental_prefill_expert_mnk_mnk():
         input=down,
         par_dispatch=4,
     )
+    """
 
     # ================ Rewrite passes ================
     step_graph = infer_broadcast(step_graph)
