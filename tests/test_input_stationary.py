@@ -5,7 +5,7 @@ from step_py.utility_ops import *
 from step_py.ops import *
 import numpy as np
 from sim import simulate, HBMConfig
-from step_py.functions import map_fn
+from step_py.functions import map_fn, init_fn
 from utils.gold_checking import check_gold_tensor
 from utils.draw_graph import save_graph_format
 from rewrite.broadcast import infer_broadcast
@@ -232,6 +232,10 @@ def test_prefill_expert_mnk_mnk():
         in1=formatted_input,
         in2=flattened_w_gate_reassemble,
         fn=map_fn.Matmul(),
+        init_fn=init_fn.Zero(
+            shape=(gate_up_tile_config.m, gate_up_tile_config.n),
+            dtype=formatted_input.stream.stream_dtype.tile_dtype,
+        ),
         rank=1,
         write_back_mu=False,
         compute_bw=GATE_COMPUTE_BW,
@@ -252,6 +256,10 @@ def test_prefill_expert_mnk_mnk():
         in1=formatted_input,
         in2=flattened_w_up_reassemble,
         fn=map_fn.Matmul(),
+        init_fn=init_fn.Zero(
+            shape=(gate_up_tile_config.m, gate_up_tile_config.n),
+            dtype=formatted_input.stream.stream_dtype.tile_dtype,
+        ),
         rank=1,
         write_back_mu=False,
         compute_bw=UP_COMPUTE_BW,
@@ -333,6 +341,10 @@ def test_prefill_expert_mnk_mnk():
         in1=formatted_gate_up,
         in2=flattened_w_down_reassemble,
         fn=map_fn.Matmul(),
+        init_fn=init_fn.Zero(
+            shape=(down_tile_config.m, down_tile_config.n),
+            dtype=formatted_gate_up.stream.stream_dtype.tile_dtype,
+        ),
         rank=1,
         write_back_mu=True,
         compute_bw=DOWN_COMPUTE_BW,
@@ -573,6 +585,10 @@ def test_incremental_prefill_expert_mnk_mnk():
         in1=formatted_input,
         in2=flattened_w_gate_reassemble,
         fn=map_fn.Matmul(),
+        init_fn=init_fn.Zero(
+            shape=(gate_up_tile_config.m, gate_up_tile_config.n),
+            dtype=formatted_input.stream.stream_dtype.tile_dtype,
+        ),
         rank=1,
         write_back_mu=False,
         compute_bw=GATE_COMPUTE_BW,
