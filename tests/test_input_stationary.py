@@ -407,15 +407,15 @@ def test_incremental_prefill_expert_mnk_mnk():
 
     # ------------ Gold calculation ------------
     linear_gate_gold = moe_linear_gold_calc_batched(
-        input, routing_expert_selection, w_gate_list
+        input_tensor, expert_indices, w_gate_list
     )  # [B, N, MLP_HID]
     act_linear_gate_gold = torch.nn.functional.silu(linear_gate_gold)  # [B, N, MLP_HID]
     linear_up_gold = moe_linear_gold_calc_batched(
-        input, routing_expert_selection, w_up_list
+        input_tensor, expert_indices, w_up_list
     )  # [B, N, MLP_HID]
     gold_up = act_linear_gate_gold * linear_up_gold  # [B, N, MLP_HID]
     linear_down_gold = moe_linear_gold_calc_batched(
-        gold_up, routing_expert_selection, w_down_list
+        gold_up, expert_indices, w_down_list
     )  # [B, N, H]
     final_gold = linear_down_gold  # [B, N, H]
 
@@ -425,8 +425,8 @@ def test_incremental_prefill_expert_mnk_mnk():
         is_multihot=True,
         tensor=routing_expert_selection,
     )
+    # [1, B, N]
     print(f"Control stream shape: {control.stream.shape}")
-    print(f"[1, B, N] = {[1, B, N]}")
 
     # ===================== Tiling Config =====================
     gate_up_tile_config = LinearTileConfig(m=1, n=32, k=32)
@@ -502,7 +502,7 @@ def test_incremental_prefill_expert_mnk_mnk():
                 tile_row=gate_up_tile_config.k,
                 tile_col=gate_up_tile_config.n,
                 par_dispatch=4,
-            )  # [Di, MLP_HID // 32, H // 32]
+            )  # [Di, MLP_HID // 32, H // 32] = [2,4,2] x 4
         )
 
     REASSEMBLE_RANK = 2
@@ -513,18 +513,23 @@ def test_incremental_prefill_expert_mnk_mnk():
         reassemble_rank=REASSEMBLE_RANK,
         switch_cycles=[1] * EXPERT,
         write_back_mu=False,
-    )
+    )  # [1, B, N, 1, MLP_HID // 32, H // 32] = [1,2,4,1,4,2]
+    """
+    input: [2,4,2]
+    ref: [1,2,4]
+    output: [1,2,4,1,4,2]
+    """
 
     # Substitute the dynamic dim in the stream as we have a statically known number of selected experts
     w_gate_reassemble.stream.shape = (
         w_gate_reassemble.stream.shape[: -(REASSEMBLE_RANK + 1)]
         + (1,)
         + w_gate_reassemble.stream.shape[-REASSEMBLE_RANK:]
-    )
+    )  # [1, B, N, 1, MLP_HID // 32, H // 32]
 
     flattened_w_gate_reassemble = Flatten(
         graph=step_graph, input=w_gate_reassemble, min_rank=1, max_rank=2
-    )
+    )  # output: [1,2,4,4,2]
 
     """
     w_up_partition = FlatPartition(
@@ -578,8 +583,8 @@ def test_incremental_prefill_expert_mnk_mnk():
         graph=step_graph, input=w_up_reassemble, min_rank=1, max_rank=2
     )
     """
-    # # ---------- Computation ----------
-    # # Linear (Gate)
+    # ---------- Computation ----------
+    # Linear (Gate)
     gate = BinaryMapAccum(
         graph=step_graph,
         in1=formatted_input,
@@ -595,17 +600,17 @@ def test_incremental_prefill_expert_mnk_mnk():
     )  # [1, B, N, MLP_HID // 32]
 
     # Activation (SiLU)
-    silu_gate = UnaryMap(
-        graph=step_graph,
-        input=gate,
-        fn=map_fn.Silu(),
-        write_back_mu=False,
-        compute_bw=ACT_FN_COMPUTE_BW,
-    )
+    # silu_gate = UnaryMap(
+    #     graph=step_graph,
+    #     input=gate,
+    #     fn=map_fn.Silu(),
+    #     write_back_mu=False,
+    #     compute_bw=ACT_FN_COMPUTE_BW,
+    # )
 
     output = OffChipStore(
         graph=step_graph,
-        input=silu_gate,
+        input=gate,  # silu_gate,
         par_dispatch=4,
     )
 
@@ -716,9 +721,18 @@ def test_incremental_prefill_expert_mnk_mnk():
     step_graph = infer_broadcast(step_graph)
 
     # ================ Check whether the shapes match ================
-    print(f"Gold (up) shape: {final_gold.shape}")
+    print(f"Gold shape: {linear_gate_gold.shape}")
     print(f"Output shape: {output.get_untiled_shape()}")
 
     # ================ Print the STeP Graph ================
     OUTPUT_FILENAME = "input_stationary"
     save_graph_format(step_graph, OUTPUT_FILENAME, ["png"])
+
+    simulate(
+        step_graph,
+        False,  # logging
+        HBMConfig(64, 8, 2, 2, 1, 14),
+        "/home/ginasohn/step_tl/graph.pb",
+    )
+
+    check_gold_tensor("output", linear_gate_gold)
