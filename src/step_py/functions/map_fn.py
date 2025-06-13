@@ -64,30 +64,6 @@ class Matmul(MapFn):
         )  # Return the resulting Tile type
 
 
-class SelectMul(MapFn):
-    select_row_id: int
-    select_col_id: int
-
-    def __init__(self, select_row_id: int, select_col_id: int = 0):
-        super().__init__()
-        self.select_row_id = select_row_id
-        self.select_col_id = select_col_id
-
-    def apply(self, input_tp: Tuple) -> Tile:
-        if len(input_tp) != 2:
-            raise ValueError("SelectMul requires exactly two input types.")
-        tile_2d, tile_1d = input_tp
-
-        if not (isinstance(tile_2d, Tile) and isinstance(tile_1d, Tile)):
-            raise TypeError("Both inputs to SelectMul must be of type Tile.")
-
-        result_shape = (
-            tile_2d.shape[0],
-            tile_2d.shape[1],
-        )
-        return Tile(tile_dtype=tile_2d.tile_dtype, shape=result_shape)
-
-
 class Mul(MapFn):
     """
     A function that performs element-wise multiplication.
