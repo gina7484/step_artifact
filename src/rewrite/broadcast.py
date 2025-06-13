@@ -12,7 +12,17 @@ def infer_broadcast(graph: nx.MultiDiGraph) -> nx.MultiDiGraph:
 
     for node, neighbors in graph.adjacency():
         if len(neighbors) > 1:
-            broadcast_nodes[node] = list(neighbors.keys())
+            neighbor_nodes = list(neighbors.keys())
+            broadcast_nodes[node] = neighbor_nodes
+
+            multi_edge_nodes = []
+            for neighbor in neighbor_nodes:
+                edge_count = graph.number_of_edges(node, neighbor)
+                if edge_count > 1:
+                    multi_edge_nodes.extend([neighbor] * (edge_count - 1))
+
+            broadcast_nodes[node].extend(multi_edge_nodes)
+
         elif len(neighbors) == 1:
             edge_count = graph.number_of_edges(node, list(neighbors.keys())[0])
             if edge_count > 1:
@@ -68,6 +78,9 @@ def infer_broadcast(graph: nx.MultiDiGraph) -> nx.MultiDiGraph:
 
             broadcast = Broadcast(
                 graph=graph, input=src_node, num_consumers=len(dst_node_list)
+            )
+            print(
+                f"Broadcasting {src_node} to {len(dst_node_list)} consumers: {dst_node_list}"
             )
 
             # Update the downstream nodes
