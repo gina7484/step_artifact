@@ -1,6 +1,6 @@
 import torch
 from networkx import MultiDiGraph
-from step_py.functions import map_fn
+from step_py.functions import map_fn, init_fn
 from step_py.ops import *
 from step_py.utility_ops import *
 from rewrite.broadcast import infer_broadcast
@@ -25,7 +25,6 @@ def pytorch_ref(
         )
     return output_tensor
 
-
 def step_impl(
     expert_ups,
     expert_downs,
@@ -33,12 +32,16 @@ def step_impl(
     input_tensor,
     indices,
     weights,
+    n_activated,
     E,
     N,
     D,
     F,
     tile_F,
 ):
+    step_graph: MultiDiGraph = MultiDiGraph()
+    offchip_par_dispatch = 4
+
     step_graph: MultiDiGraph = MultiDiGraph()
     offchip_par_dispatch = 4
 
@@ -90,8 +93,12 @@ def step_impl(
 
     # Stage 2: Generate the selection stream
     expert_selection_one_hot = torch.nn.functional.one_hot(indices, E)
+    weight_select_gen = SelectGen(
+        is_multihot=True,
+        tensor=expert_selection_one_hot
+    ) # [1, N, n_activated]
     expert_selection_multi_hot = expert_selection_one_hot.sum(dim=-2)
-    select_gen = SelectGen(
+    feature_select_gen = SelectGen(
         is_multihot=True,
         tensor=expert_selection_multi_hot,
     )  # [1, N]
@@ -99,18 +106,18 @@ def step_impl(
     # Stage 3: Load the weights
     weights_load = OffChipLoad(
         underlying=weights,
-        stride=(1,),
-        out_shape_tiled=(N,),
+        stride=(n_activated, 1),
+        out_shape_tiled=(N, n_activated),
         tile_row=1,
-        tile_col=E,
+        tile_col=1,
         par_dispatch=offchip_par_dispatch,
-    )  # [1, N]
+    )  # [1, N, n_activated]
 
-    # Stage 4: Partition the input feature stream
+        # Stage 4: Partition the input feature stream
     expert_feature_streams = FlatPartition(
         step_graph,
         input_load,  # [1, N]
-        select_gen,  # [1, N]
+        feature_select_gen,  # [1, N]
         partition_rank=0,
         switch_cycles=[1 for _ in range(E)],
         write_back_mu=False,
@@ -217,6 +224,7 @@ def step_impl(
             feature,
             weight,
             map_fn.Matmul(weight_transposed=False),
+            init_fn.Zero(shape=(1, D), dtype=Float32()),
             1,
             False,
             1024,
@@ -228,12 +236,16 @@ def step_impl(
     expert_weight_streams = FlatPartition(
         step_graph,
         weights_load,
-        select_gen,
+        weight_select_gen,
         partition_rank=0,
         switch_cycles=[1 for _ in range(E)],
         write_back_mu=False,
         num_consumers=E,
     )  # [Dyn]
+
+    # Post Stage 13: Align the dynamic shapes with down_feature_streams
+    for i in range(E):
+        expert_weight_streams._stream[i].shape = down_feature_streams[i]._stream.shape
 
     # Stage 14: Compute the weighted features
     weighted_feature_streams = [
@@ -241,7 +253,7 @@ def step_impl(
             step_graph,
             down_feature_streams[i],
             (expert_weight_streams, i),
-            map_fn.SelectMul(0, i),
+            map_fn.Mul(),
             False,
             1024,
         )
@@ -252,7 +264,7 @@ def step_impl(
     reassembled_stream = FlatReassemble(
         step_graph,
         weighted_feature_streams,  # [Dyn]
-        select_gen,  # [1, N]
+        feature_select_gen,  # [1, N]
         reassemble_rank=0,
         switch_cycles=[1 for _ in range(E)],
         write_back_mu=False,
@@ -264,6 +276,7 @@ def step_impl(
         reassembled_stream,  # [1, N, Ragged]
         Tile(tile_dtype=Float32(), shape=(1, D)),
         map_fn.Add(),
+        init_fn.Zero(shape=(1, D), dtype=Float32()),
         1,
         False,
         1024,
@@ -281,7 +294,6 @@ def step_impl(
     OUTPUT_FILENAME = "moe_weight_stationary"
     save_graph_format(step_graph, OUTPUT_FILENAME, ["png"])
     return output
-
 
 def test_expert():
     # N, D, F, E = 3, 8, 6, 5
@@ -312,6 +324,7 @@ def test_expert():
         input_tensor,
         indices,
         selected_weights,
+        n_activated,
         E,
         N,
         D,
@@ -320,6 +333,5 @@ def test_expert():
     )
     print(f"Gold shape: {gold.shape}")
     print(f"Output shape: {output.get_untiled_shape()}")
-
 
 test_expert()

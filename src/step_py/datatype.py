@@ -10,11 +10,17 @@ class ElementTP(ABC):
 
 
 class Float16(ElementTP):
-    pass
+    def __eq__(self, value):
+        if isinstance(value, Float16):
+            return True
+        return False
 
 
 class Float32(ElementTP):
-    pass
+    def __eq__(self, value):
+        if isinstance(value, Float32):
+            return True
+        return False
 
 
 @dataclass
