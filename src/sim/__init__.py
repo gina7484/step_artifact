@@ -47,10 +47,13 @@ def to_pb_elem_to_elem_func(op_fn: map_fn.MapFn) -> func_pb2.ElemtoElemFunc:
     return func_pb
 
 
+# pylint: disable=no-member
 def to_pb_init_func(op_fn: init_fn.InitFn) -> func_pb2.InitFunc:
     func_pb = func_pb2.InitFunc()
     if isinstance(op_fn, init_fn.Zero):
         func_pb.zero.CopyFrom(func_pb2.Zero())
+    elif isinstance(op_fn, init_fn.Empty):
+        func_pb.empty.CopyFrom(func_pb2.Empty())
     else:
         raise NotImplementedError(
             f"Function {op_fn} is not implemented for serialization."
@@ -526,6 +529,42 @@ def serialize(graph: MultiDiGraph, protobuf_file: str):
                 )
 
             operator.printer_context.CopyFrom(printercontext_pb)
+        elif isinstance(op, PrinterContext):
+            printercontext_pb = ops_pb2.PrinterContext()
+
+            if isinstance(op.input, Tuple):
+                input_node, idx = op.input
+                printercontext_pb.stream_idx = idx
+                printercontext_pb.input_id = input_node.instance_id
+                printercontext_pb.dtype.CopyFrom(
+                    to_pb_datatype(input_node.stream_idx(idx).stream_dtype)
+                )
+
+            else:
+                printercontext_pb.input_id = op.input.instance_id
+                printercontext_pb.dtype.CopyFrom(
+                    to_pb_datatype(op.input.stream.stream_dtype)
+                )
+
+            operator.printer_context.CopyFrom(printercontext_pb)
+        elif isinstance(op, ConsumerContext):
+            consumercontext_pb = ops_pb2.ConsumerContext()
+
+            if isinstance(op.input, Tuple):
+                input_node, idx = op.input
+                consumercontext_pb.stream_idx = idx
+                consumercontext_pb.input_id = input_node.instance_id
+                consumercontext_pb.dtype.CopyFrom(
+                    to_pb_datatype(input_node.stream_idx(idx).stream_dtype)
+                )
+
+            else:
+                consumercontext_pb.input_id = op.input.instance_id
+                consumercontext_pb.dtype.CopyFrom(
+                    to_pb_datatype(op.input.stream.stream_dtype)
+                )
+
+            operator.consumer_context.CopyFrom(consumercontext_pb)
         else:
             raise ValueError(f"Unsupported operation type: {type(op)}")
 
