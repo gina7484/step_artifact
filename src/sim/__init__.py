@@ -368,7 +368,6 @@ def serialize(graph: MultiDiGraph, protobuf_file: str):
         elif isinstance(op, RepeatStatic):
             repeatstatic_pb = ops_pb2.RepeatStatic()
 
-            repeatstatic_pb.input_id = op.input.instance_id
             if isinstance(op.input, Tuple):
                 input_node, idx = op.input
                 repeatstatic_pb.stream_idx = idx

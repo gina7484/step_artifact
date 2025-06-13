@@ -5,33 +5,13 @@ from step_py.ops import *
 from step_py.utility_ops import *
 from rewrite.broadcast import infer_broadcast
 from utils.draw_graph import save_graph_format
-
-
-def pytorch_ref(
-    expert_ups, expert_downs, expert_gates, input_tensor, indices, weights, E, N, D
-) -> OffChipStore:
-    output_tensor = torch.zeros(N, D)
-    counts = torch.bincount(indices.flatten(), minlength=E).tolist()
-    for i in range(E):
-        if counts[i] == 0:
-            continue
-        idx, top = torch.where(indices == i)
-        output_tensor[idx] += weights[idx, top, None] * (
-            (
-                (input_tensor[idx] @ expert_ups[i])
-                * torch.nn.functional.silu(input_tensor[idx] @ expert_gates[i])
-            )
-            @ expert_downs[i]
-        )
-    return output_tensor
+from sim import simulate, HBMConfig
 
 def step_impl(
     expert_ups,
     expert_downs,
-    expert_gates,
     input_tensor,
     indices,
-    weights,
     n_activated,
     E,
     N,
@@ -41,7 +21,7 @@ def step_impl(
 ):
     step_graph: MultiDiGraph = MultiDiGraph()
     offchip_par_dispatch = 4
-
+    COMPUTE_BW = 8
     # Stage 1: Load the parameters and input tensors
     up_loads = [
         OffChipLoad(
@@ -67,18 +47,6 @@ def step_impl(
         for i in range(E)
     ]  # [1, F // tile_F]
 
-    gate_loads = [
-        OffChipLoad(
-            underlying=expert_gates[i],
-            stride=(1,),
-            out_shape_tiled=(F // tile_F,),
-            tile_row=D,
-            tile_col=tile_F,
-            par_dispatch=offchip_par_dispatch,
-        )
-        for i in range(E)
-    ]  # [1, F // tile_F]
-
     input_load = OffChipLoad(
         underlying=input_tensor,
         stride=(1,),
@@ -90,10 +58,6 @@ def step_impl(
 
     # Stage 2: Generate the selection stream
     expert_selection_one_hot = torch.nn.functional.one_hot(indices, E)
-    weight_select_gen = SelectGen(
-        is_multihot=True,
-        tensor=expert_selection_one_hot
-    ) # [1, N, n_activated]
     expert_selection_multi_hot = expert_selection_one_hot.sum(dim=-2)
     feature_select_gen = SelectGen(
         is_multihot=True,
@@ -101,16 +65,8 @@ def step_impl(
     )  # [1, N]
 
     # Stage 3: Load the weights
-    weights_load = OffChipLoad(
-        underlying=weights,
-        stride=(n_activated, 1),
-        out_shape_tiled=(N, n_activated),
-        tile_row=1,
-        tile_col=1,
-        par_dispatch=offchip_par_dispatch,
-    )  # [1, N, n_activated]
 
-        # Stage 4: Partition the input feature stream
+    # Stage 4: Partition the input feature stream
     expert_feature_streams = FlatPartition(
         step_graph,
         input_load,  # [1, N]
@@ -154,50 +110,16 @@ def step_impl(
             weight,
             map_fn.Matmul(weight_transposed=False),
             False,
-            1024,
+            COMPUTE_BW,
         )
         for feature, weight in zip(repeated_feature_streams, ready_up_loads)
     ]  # [Dyn, F // tile_F]
 
     # Stage 8: Repeat gate parameters
-    deranked_gate_loads = [
-        Bufferize(step_graph, stream, 1) for stream in gate_loads
-    ]  # [1,]
-    ready_gate_loads = [
-        DynStreamify(
-            step_graph,
-            deranked_gate_loads[i],  # [1,]
-            (expert_feature_streams, i),  # [Dyn,]
-            0,
-            1,
-        )
-        for i in range(E)
-    ]  # [Dyn, F // tile_F]
 
     # Stage 9: Compute the gate features
-    gate_feature_streams = [
-        UnaryMap(
-            step_graph,
-            BinaryMap(
-                step_graph,
-                feature,
-                weight,
-                map_fn.Matmul(weight_transposed=False),
-                False,
-                1024,
-            ),
-            map_fn.Silu(),
-            False,
-            1024,
-        )
-        for feature, weight in zip(repeated_feature_streams, ready_gate_loads)
-    ]  # [Dyn, F // tile_F]
 
     # Stage 10: Compute the projected features
-    projected_feature_streams = [
-        BinaryMap(step_graph, up_feature, gate_feature, map_fn.Mul(), False, 1024)
-        for up_feature, gate_feature in zip(up_feature_streams, gate_feature_streams)
-    ]  # [Dyn, F // tile_F]
 
     # Stage 11: Repeat down parameters
     deranked_down_loads = [
@@ -215,6 +137,7 @@ def step_impl(
     ]  # [Dyn, F // tile_F]
 
     # Stage 12: Compute the down features
+    projected_feature_streams = up_feature_streams
     down_feature_streams = [
         BinaryMapAccum(
             step_graph,
@@ -224,40 +147,19 @@ def step_impl(
             init_fn.Zero(shape=(1, D), dtype=Float32()),
             1,
             False,
-            1024,
+            COMPUTE_BW,
         )
         for feature, weight in zip(projected_feature_streams, ready_down_loads)
     ]  # [Dyn]
 
     # Stage 13: Partition the scalar weights
-    expert_weight_streams = FlatPartition(
-        step_graph,
-        weights_load,
-        weight_select_gen,
-        partition_rank=0,
-        switch_cycles=[1 for _ in range(E)],
-        write_back_mu=False,
-        num_consumers=E,
-    )  # [Dyn]
 
     # Post Stage 13: Align the dynamic shapes with down_feature_streams
-    for i in range(E):
-        expert_weight_streams._stream[i].shape = down_feature_streams[i]._stream.shape
 
     # Stage 14: Compute the weighted features
-    weighted_feature_streams = [
-        BinaryMap(
-            step_graph,
-            down_feature_streams[i],
-            (expert_weight_streams, i),
-            map_fn.Mul(),
-            False,
-            1024,
-        )
-        for i in range(E)
-    ]  # [Dyn]
 
     # Stage 15: Reassemble the weighted features
+    weighted_feature_streams = down_feature_streams
     reassembled_stream = FlatReassemble(
         step_graph,
         weighted_feature_streams,  # [Dyn]
@@ -268,59 +170,47 @@ def step_impl(
     )  # [1, N, Ragged]
 
     # Stage 16: Accumulate the reassembled features
-    accumed_stream = Accum(
-        step_graph,
-        reassembled_stream,  # [1, N, Ragged]
-        Tile(tile_dtype=Float32(), shape=(1, D)),
-        map_fn.Add(),
-        init_fn.Zero(shape=(1, D), dtype=Float32()),
-        1,
-        False,
-        1024,
-    )  # [1, N]
 
     # Stage 17: Store the output
+    accumed_stream = reassembled_stream
+    accumed_stream._stream.shape =  accumed_stream._stream.shape[:-1] + (n_activated,)
+    print(f"Final shape: {accumed_stream._stream.shape}")
     output = OffChipStore(
         step_graph,
         accumed_stream,
         par_dispatch=offchip_par_dispatch,
         store_file_name="output",
-    )  # [1, N]
-
+    )  # [1, N, Ragged]
+    
     step_graph = infer_broadcast(step_graph)
-    OUTPUT_FILENAME = "moe_weight_stationary"
+    OUTPUT_FILENAME = "moe_weight_stationary_debug"
     save_graph_format(step_graph, OUTPUT_FILENAME, ["png"])
+    
+    simulate(
+        step_graph,
+        False,  # logging
+        HBMConfig(64, 8, 2, 2, 1, 14),
+        "/home/zgh23/step_tl/graph.pb",
+    )
+    
     return output
 
 def test_expert():
     # N, D, F, E = 3, 8, 6, 5
+    # tile_F = 3
     N, D, F, E = 19, 64, 128, 8
     tile_F = 16
     n_activated = 2
     weights = torch.randn(N, E).softmax(dim=-1)
-    selected_weights, indices = torch.topk(weights, n_activated, dim=-1)
+    _, indices = torch.topk(weights, n_activated, dim=-1)
     input_tensor = torch.randn(N, D)
     expert_ups = [torch.randn(D, F) for _ in range(E)]
     expert_downs = [torch.randn(F, D) for _ in range(E)]
-    expert_gates = [torch.randn(D, F) for _ in range(E)]
-    gold = pytorch_ref(
-        expert_ups,
-        expert_downs,
-        expert_gates,
-        input_tensor,
-        indices,
-        selected_weights,
-        E,
-        N,
-        D,
-    )
     output = step_impl(
         expert_ups,
         expert_downs,
-        expert_gates,
         input_tensor,
         indices,
-        selected_weights,
         n_activated,
         E,
         N,
@@ -328,7 +218,6 @@ def test_expert():
         F,
         tile_F,
     )
-    print(f"Gold shape: {gold.shape}")
     print(f"Output shape: {output.get_untiled_shape()}")
 
 test_expert()
