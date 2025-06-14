@@ -6,7 +6,7 @@ from networkx import MultiDiGraph
 import torch
 
 from step_py.datatype import Stream
-from step_py.functions import map_fn
+from step_py.functions import map_fn, init_fn
 from step_py.ops import *
 from step_py.utility_ops import *
 
@@ -85,13 +85,17 @@ def Linear(
 
     # ================= Computation =================
     result = BinaryMapAccum(
-        step_graph,
-        formatted_input,
-        formatted_weight,
-        map_fn.Matmul(),
-        1,
-        write_back_mu,
-        comp_bw,
+        graph=step_graph,
+        in1=formatted_input,
+        in2=formatted_weight,
+        fn=map_fn.Matmul(),
+        init_fn=init_fn.Zero(
+            shape=(tile_config.m, tile_config.n),
+            dtype=Float32(),
+        ),
+        rank=1,
+        write_back_mu=write_back_mu,
+        compute_bw=comp_bw,
     )
 
     return result
