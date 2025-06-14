@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 from step_py.ops import *
 from step_py.utility_ops import *
 from step_py.functions import map_fn, init_fn
@@ -20,15 +20,17 @@ class HBMConfig:
 
 
 def simulate(
-    graph: List[StepOps], logging: bool, hbm_config: HBMConfig, protobuf_file: str
+    graph: List[StepOps],
+    logging: bool,
+    hbm_config: HBMConfig,
+    protobuf_file: str,
+    db_name: Optional[str] = None,
 ):
 
     serialize(graph, protobuf_file)
 
     a = step_perf.run_graph(  # pylint: disable=no-member
-        protobuf_file,
-        logging,
-        hbm_config,
+        protobuf_file, logging, hbm_config, db_name
     )
     print(a)
 
