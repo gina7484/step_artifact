@@ -531,7 +531,6 @@ def test_incremental_prefill_expert_mnk_mnk():
         graph=step_graph, input=w_gate_reassemble, min_rank=1, max_rank=2
     )  # output: [1,2,4,4,2]
 
-    """
     w_up_partition = FlatPartition(
         graph=step_graph,
         input=control,
@@ -582,7 +581,7 @@ def test_incremental_prefill_expert_mnk_mnk():
     flattened_w_up_reassemble = Flatten(
         graph=step_graph, input=w_up_reassemble, min_rank=1, max_rank=2
     )
-    """
+
     # ---------- Computation ----------
     # Linear (Gate)
     gate = BinaryMapAccum(
@@ -600,27 +599,30 @@ def test_incremental_prefill_expert_mnk_mnk():
     )  # [1, B, N, MLP_HID // 32]
 
     # Activation (SiLU)
-    # silu_gate = UnaryMap(
-    #     graph=step_graph,
-    #     input=gate,
-    #     fn=map_fn.Silu(),
-    #     write_back_mu=False,
-    #     compute_bw=ACT_FN_COMPUTE_BW,
-    # )
-
-    output = OffChipStore(
+    silu_gate = UnaryMap(
         graph=step_graph,
-        input=gate,  # silu_gate,
-        par_dispatch=4,
+        input=gate,
+        fn=map_fn.Silu(),
+        write_back_mu=False,
+        compute_bw=ACT_FN_COMPUTE_BW,
     )
 
-    """
+    # output = OffChipStore(
+    #     graph=step_graph,
+    #     input=gate,  # silu_gate,
+    #     par_dispatch=4,
+    # )
+
     # Linear (Up)
     up = BinaryMapAccum(
         graph=step_graph,
         in1=formatted_input,
         in2=flattened_w_up_reassemble,
         fn=map_fn.Matmul(),
+        init_fn=init_fn.Zero(
+            shape=(gate_up_tile_config.m, gate_up_tile_config.n),
+            dtype=formatted_input.stream.stream_dtype.tile_dtype,
+        ),
         rank=1,
         write_back_mu=False,
         compute_bw=UP_COMPUTE_BW,
@@ -704,6 +706,10 @@ def test_incremental_prefill_expert_mnk_mnk():
         in1=formatted_gate_up,
         in2=flattened_w_down_reassemble,
         fn=map_fn.Matmul(),
+        init_fn=init_fn.Zero(
+            shape=(down_tile_config.m, down_tile_config.n),
+            dtype=formatted_gate_up.stream.stream_dtype.tile_dtype,
+        ),
         rank=1,
         write_back_mu=True,
         compute_bw=DOWN_COMPUTE_BW,
@@ -715,13 +721,12 @@ def test_incremental_prefill_expert_mnk_mnk():
         input=down,
         par_dispatch=4,
     )
-    """
 
     # ================ Rewrite passes ================
     step_graph = infer_broadcast(step_graph)
 
     # ================ Check whether the shapes match ================
-    print(f"Gold shape: {linear_gate_gold.shape}")
+    print(f"Gold shape: {final_gold.shape}")
     print(f"Output shape: {output.get_untiled_shape()}")
 
     # ================ Print the STeP Graph ================
@@ -735,4 +740,4 @@ def test_incremental_prefill_expert_mnk_mnk():
         "/home/ginasohn/step_tl/graph.pb",
     )
 
-    check_gold_tensor("output", linear_gate_gold)
+    check_gold_tensor("output", final_gold)

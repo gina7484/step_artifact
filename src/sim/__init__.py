@@ -40,6 +40,13 @@ def to_pb_elem_to_elem_func(op_fn: map_fn.MapFn) -> func_pb2.ElemtoElemFunc:
         map_fn_pb = func_pb2.Matmul()
         map_fn_pb.weight_transposed = op_fn.weight_transposed
         func_pb.matmul.CopyFrom(map_fn_pb)
+    elif isinstance(op_fn, map_fn.Silu):
+        map_fn_pb = func_pb2.Silu()
+        func_pb.silu.CopyFrom(map_fn_pb)
+    elif isinstance(op_fn, map_fn.Mul):
+        map_fn_pb = func_pb2.Mul()
+        func_pb.mul.CopyFrom(map_fn_pb)
+
     else:
         raise NotImplementedError(
             f"Function {op_fn} is not implemented for serialization."
@@ -368,7 +375,6 @@ def serialize(graph: MultiDiGraph, protobuf_file: str):
         elif isinstance(op, RepeatStatic):
             repeatstatic_pb = ops_pb2.RepeatStatic()
 
-            repeatstatic_pb.input_id = op.input.instance_id
             if isinstance(op.input, Tuple):
                 input_node, idx = op.input
                 repeatstatic_pb.stream_idx = idx
