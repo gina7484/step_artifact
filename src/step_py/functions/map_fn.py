@@ -118,7 +118,7 @@ class Add(MapFn):
         tile_a, tile_b = input_tp[0], input_tp[1]
 
         if not (isinstance(tile_a, Tile) and isinstance(tile_b, Tile)):
-            raise TypeError("Both inputs to Mul must be of type Tile.")
+            raise TypeError("Both inputs to Add must be of type Tile.")
 
         # Check if the shapes are broadcastable for element-wise multiplication
         tile_a_0, tile_a_1 = tile_a.shape
@@ -162,3 +162,18 @@ class Silu(MapFn):
         return Tile(
             tile_dtype=in_tile.tile_dtype, shape=in_tile.shape
         )  # SiLU does not change the shape
+
+class RetileRow(MapFn):
+    def __init__(self):
+        super().__init__()
+
+    def apply(self, input_tp: Tuple) -> Tile:
+        in_tile, accum_tile = input_tp[0], input_tp[1]
+
+        if not (isinstance(in_tile, Tile) and isinstance(accum_tile, Tile)):
+            raise TypeError("Both inputs must be of type Tile.")
+        assert in_tile.shape[1] == accum_tile.shape[1]
+        return Tile(
+            tile_dtype=in_tile.tile_dtype,
+            shape=(in_tile.shape[0] + accum_tile.shape[0], accum_tile.shape[1]),
+        )
