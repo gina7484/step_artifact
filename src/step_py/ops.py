@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from sympy import ceiling
 import torch
 from typing import List, Tuple, Union
 from step_py.functions.init_fn import InitFn
@@ -7,7 +7,6 @@ from step_py.functions.map_fn import MapFn
 from step_py.datatype import Buffer, Stream, Tile, Select, Float16, Float32
 from networkx import MultiDiGraph
 import sympy
-
 
 def get_stream(input: Union["StepOps", Tuple["StepOps", int]]) -> Stream:
     if isinstance(input, StepOps):
@@ -423,7 +422,7 @@ class BinaryMap(StepOps):
 
         assert (
             in1_stream.shape == in2_stream.shape
-        ), "Input streams must have the same shape."
+        ), f"Input streams must have the same shape: {in1_stream.shape} != {in2_stream.shape}"
 
         self._stream = Stream(
             stream_dtype=self.fn.apply(
@@ -1219,14 +1218,9 @@ class Accum(StepOps):
 
         in_stream: Stream = get_stream(input)
         assert accum_rank > 0, "Accum rank must be greater than 0."
-        out_dtype = self.fn.apply((in_stream.stream_dtype, output_stream_dtype))
-        accum_dtype = self.init_fn.apply()
-        assert (
-            out_dtype == accum_dtype
-        ), f"Output stream dtype {out_dtype} must match the accumulated dtype {accum_dtype}."
 
         self._stream = Stream(
-            stream_dtype=out_dtype,
+            stream_dtype=output_stream_dtype,
             shape=in_stream.shape[: -self.accum_rank],
         )
 
@@ -1316,6 +1310,141 @@ class Flatten(StepOps):
         new_shape = shape[:min_index] + (merged_dim,) + shape[max_index + 1 :]
 
         return new_shape
+
+    @property
+    def stream(self) -> Stream:
+        """The stream of the operation."""
+        return self._stream
+
+    @property
+    def stream_list(self) -> List[Stream]:
+        return [self._stream]
+
+    @property
+    def input(self) -> Union["StepOps", Tuple["StepOps", int]]:
+        return self._input
+
+    @property
+    def input_list(self) -> List[Union["StepOps", Tuple["StepOps", int]]]:
+        return [self._input]
+
+    def stream_idx(self, idx: int) -> Stream:
+        raise NotImplementedError(
+            "Shouldn't be called for nodes that only have a single output stream"
+        )
+
+    def __str__(self):
+        cls = self.__class__.__name__
+        return f"{cls}_{self.instance_id}"
+
+    def replace_input(
+        self,
+        org_input: Union["StepOps", Tuple["StepOps", int]],
+        new_input: Union["StepOps", Tuple["StepOps", int]],
+    ):
+        if get_stream(self.input) != get_stream(new_input):
+            raise ValueError("The shape of the input stream shouldn't change")
+        self._input = new_input
+
+class Reshape(StepOps):
+    _input: Union[StepOps, Tuple[StepOps, int]]
+    chunk_size: int
+    reshape_rank: int
+    _stream: Stream
+
+    def __init__(
+        self,
+        graph: MultiDiGraph,
+        input: Union[StepOps, Tuple[StepOps, int]],
+        chunk_size: int,
+        reshape_rank: int
+    ):
+        super().__init__()
+        self._input = input
+        self.chunk_size = chunk_size
+        self.reshape_rank = reshape_rank
+        in_stream: Stream = get_stream(input)
+        assert reshape_rank >= 0 and reshape_rank <= in_stream.rank, f"Reshape rank must be between 0 and {in_stream.rank}."
+        rank_pos = in_stream.rank - reshape_rank
+        self._stream = Stream(
+            stream_dtype=in_stream.stream_dtype,
+            shape=in_stream.shape[:rank_pos] + (ceiling(in_stream.shape[rank_pos] / chunk_size), chunk_size) + in_stream.shape[(rank_pos + 1):]
+        )
+
+        input_node = input if isinstance(input, StepOps) else input[0]
+        graph.add_edge(input_node, self)
+
+    @property
+    def stream(self) -> Stream:
+        """The stream of the operation."""
+        return self._stream
+
+    @property
+    def stream_list(self) -> List[Stream]:
+        return [self._stream]
+
+    @property
+    def input(self) -> Union["StepOps", Tuple["StepOps", int]]:
+        return self._input
+
+    @property
+    def input_list(self) -> List[Union["StepOps", Tuple["StepOps", int]]]:
+        return [self._input]
+
+    def stream_idx(self, idx: int) -> Stream:
+        raise NotImplementedError(
+            "Shouldn't be called for nodes that only have a single output stream"
+        )
+
+    def __str__(self):
+        cls = self.__class__.__name__
+        return f"{cls}_{self.instance_id}"
+
+    def replace_input(
+        self,
+        org_input: Union["StepOps", Tuple["StepOps", int]],
+        new_input: Union["StepOps", Tuple["StepOps", int]],
+    ):
+        if get_stream(self.input) != get_stream(new_input):
+            raise ValueError("The shape of the input stream shouldn't change")
+        self._input = new_input
+
+
+class RetileStreamify(StepOps):
+    _input: Union[StepOps, Tuple[StepOps, int]]
+    split_row: bool
+    _stream: Stream
+
+    def __init__(
+        self,
+        graph: MultiDiGraph,
+        input: Union[StepOps, Tuple[StepOps, int]],
+        split_row: bool
+    ):
+        super().__init__()
+        self._input = input
+        self.split_row = split_row
+        in_stream: Stream = get_stream(input)
+        if split_row:
+            output_stream_shape = in_stream.shape[:-1] + (in_stream.shape[-1] * in_stream.stream_dtype.shape[0],)
+            output_stream_dtype = Tile(
+                shape=(1, in_stream.stream_dtype.shape[1]),
+                tile_dtype=in_stream.stream_dtype.tile_dtype,
+            )
+        else:
+            output_stream_shape = in_stream.shape[:-1] + (in_stream.shape[-1] * in_stream.stream_dtype.shape[1],)
+            output_stream_dtype = Tile(
+                shape=(in_stream.stream_dtype.shape[0], 1),
+                tile_dtype=in_stream.stream_dtype.tile_dtype,
+            )
+
+        self._stream = Stream(
+            stream_dtype=output_stream_dtype,
+            shape=output_stream_shape,
+        )
+        input_node = input if isinstance(input, StepOps) else input[0]
+        graph.add_edge(input_node, self)
+
 
     @property
     def stream(self) -> Stream:
