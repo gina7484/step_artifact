@@ -12,7 +12,7 @@ from rewrite.broadcast import infer_broadcast
 from utils.moe import *
 
 
-def ws_tile_mn_mk_gemv(
+def ws_tile_mn_mk_gemv_revet(
     model_config,
     batch: int,
     gate_compute_bw: int,
@@ -685,16 +685,30 @@ def ws_tile_mn_mk_gemv(
     )
 
     # ------------ Stage 17: Store the output ------------
+    # - input stream shape:    [1, B]    (tile: [1, D])
+    # - promoted stream shape: [1, B, 1] (tile: [1, D])
+    # - untiled tensor: [B,D]
     output = OffChipStore(
         step_graph,
-        accumed_stream,
+        Promote(step_graph, accumed_stream, 0),
         par_dispatch=4,
         store_file_name="output",
-    )  # [1, B]
+    )
+
+    print(f"Output untiled: {output.get_untiled_shape()}")
 
     step_graph = infer_broadcast(step_graph)
+
     OUTPUT_FILENAME = "moe_weight_stationary_gemv_step"
     save_graph_format(step_graph, OUTPUT_FILENAME, ["png"])
+
+    simulate(
+        step_graph,
+        False,  # logging
+        HBMConfig(64, 8, 2, 2, 1, 14),
+        "/home/ginasohn/step_tl/graph.pb",
+    )
+
     return output
 
 
@@ -714,9 +728,17 @@ class SmallerDeepSeekV3:
     moe_inter_dim = 128
 
 
+@dataclass
+class SmallerMixtral:
+    n_routed_experts = 8
+    n_activated_experts = 2
+    dim = 64
+    moe_inter_dim = 128
+
+
 def test_deepseekv3_ws_tile_mn_mk():
     # ------------ Model Configuration ------------
-    model_config = SmallerDeepSeekV3()
+    model_config = SmallerMixtral()
 
     # ------------ Batch Size ------------
     B = 64
@@ -733,7 +755,9 @@ def test_deepseekv3_ws_tile_mn_mk():
 
     # ------------ Expert Indices ------------
     expert_indices = torch.topk(
-        torch.randn(B, model_config.dim), model_config.n_activated_experts, dim=-1
+        torch.randn(B, model_config.n_routed_experts),
+        model_config.n_activated_experts,
+        dim=-1,
     )[1]
 
     # [B, n_routed_experts]
@@ -744,7 +768,10 @@ def test_deepseekv3_ws_tile_mn_mk():
 
     # ------------ Expert Routed Weights ------------
     # [B, n_activated_experts]
-    expert_weights = torch.randn(B, model_config.n_activated_experts)
+    # Apply softmax to normalize the weights
+    expert_weights = torch.softmax(
+        torch.randn(B, model_config.n_activated_experts), dim=-1
+    )
 
     # ------------ Expert Weights (gate, up, down) ------------
     linear_gate_list = [
@@ -772,7 +799,7 @@ def test_deepseekv3_ws_tile_mn_mk():
         for linear_down in linear_down_list
     ]
 
-    ws_tile_mn_mk_gemv(
+    output: OffChipStore = ws_tile_mn_mk_gemv(
         model_config=model_config,
         batch=B,
         gate_compute_bw=GATE_COMPUTE_BW,
@@ -791,11 +818,13 @@ def test_deepseekv3_ws_tile_mn_mk():
     )
 
     # Gold calculation
-    # final_gold = moe_gold_calc(
-    #     input_tensor,
-    #     expert_indices,
-    #     expert_weights,  # expert_weights is not used in the gold calculation
-    #     linear_gate_list,
-    #     linear_up_list,
-    #     linear_down_list,
-    # )
+    final_gold = moe_gold_calc(
+        input_tensor,
+        expert_indices,
+        expert_weights,
+        linear_gate_list,
+        linear_up_list,
+        linear_down_list,
+    )
+
+    check_gold_tensor(output.store_file_name, final_gold)
