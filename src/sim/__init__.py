@@ -48,6 +48,9 @@ def to_pb_elem_to_elem_func(op_fn: map_fn.MapFn) -> func_pb2.ElemtoElemFunc:
     elif isinstance(op_fn, map_fn.Mul):
         map_fn_pb = func_pb2.Mul()
         func_pb.mul.CopyFrom(map_fn_pb)
+    elif isinstance(op_fn, map_fn.Add):
+        map_fn_pb = func_pb2.Add()
+        func_pb.add.CopyFrom(map_fn_pb)
 
     else:
         raise NotImplementedError(

@@ -8,6 +8,7 @@ from step_py.datatype import Buffer, Stream, Tile, Select, Float16, Float32
 from networkx import MultiDiGraph
 import sympy
 
+
 def get_stream(input: Union["StepOps", Tuple["StepOps", int]]) -> Stream:
     if isinstance(input, StepOps):
         return input.stream
@@ -420,15 +421,18 @@ class BinaryMap(StepOps):
         in1_stream: Stream = get_stream(in1)
         in2_stream: Stream = get_stream(in2)
 
-        assert (
-            in1_stream.shape == in2_stream.shape
-        ), f"Input streams must have the same shape: {in1_stream.shape} != {in2_stream.shape}"
+        for dim in range(len(in1_stream.shape)):
+            if isinstance(in1_stream.shape[dim], int):
+                if in1_stream.shape[dim] != in2_stream.shape[dim]:
+                    raise ValueError(
+                        f"Input streams must have the same shape for the static dims: {in1_stream.shape} != {in2_stream.shape}"
+                    )
 
         self._stream = Stream(
             stream_dtype=self.fn.apply(
                 (in1_stream.stream_dtype, in2_stream.stream_dtype)
             ),
-            shape=self.in1.stream.shape,
+            shape=in1_stream.shape,
         )
 
         input_node1 = in1 if isinstance(in1, StepOps) else in1[0]
@@ -1346,6 +1350,7 @@ class Flatten(StepOps):
             raise ValueError("The shape of the input stream shouldn't change")
         self._input = new_input
 
+
 class Reshape(StepOps):
     _input: Union[StepOps, Tuple[StepOps, int]]
     chunk_size: int
@@ -1357,18 +1362,22 @@ class Reshape(StepOps):
         graph: MultiDiGraph,
         input: Union[StepOps, Tuple[StepOps, int]],
         chunk_size: int,
-        reshape_rank: int
+        reshape_rank: int,
     ):
         super().__init__()
         self._input = input
         self.chunk_size = chunk_size
         self.reshape_rank = reshape_rank
         in_stream: Stream = get_stream(input)
-        assert reshape_rank >= 0 and reshape_rank <= in_stream.rank, f"Reshape rank must be between 0 and {in_stream.rank}."
+        assert (
+            reshape_rank >= 0 and reshape_rank <= in_stream.rank
+        ), f"Reshape rank must be between 0 and {in_stream.rank}."
         rank_pos = in_stream.rank - reshape_rank
         self._stream = Stream(
             stream_dtype=in_stream.stream_dtype,
-            shape=in_stream.shape[:rank_pos] + (ceiling(in_stream.shape[rank_pos] / chunk_size), chunk_size) + in_stream.shape[(rank_pos + 1):]
+            shape=in_stream.shape[:rank_pos]
+            + (ceiling(in_stream.shape[rank_pos] / chunk_size), chunk_size)
+            + in_stream.shape[(rank_pos + 1) :],
         )
 
         input_node = input if isinstance(input, StepOps) else input[0]
@@ -1419,20 +1428,24 @@ class RetileStreamify(StepOps):
         self,
         graph: MultiDiGraph,
         input: Union[StepOps, Tuple[StepOps, int]],
-        split_row: bool
+        split_row: bool,
     ):
         super().__init__()
         self._input = input
         self.split_row = split_row
         in_stream: Stream = get_stream(input)
         if split_row:
-            output_stream_shape = in_stream.shape[:-1] + (in_stream.shape[-1] * in_stream.stream_dtype.shape[0],)
+            output_stream_shape = in_stream.shape[:-1] + (
+                in_stream.shape[-1] * in_stream.stream_dtype.shape[0],
+            )
             output_stream_dtype = Tile(
                 shape=(1, in_stream.stream_dtype.shape[1]),
                 tile_dtype=in_stream.stream_dtype.tile_dtype,
             )
         else:
-            output_stream_shape = in_stream.shape[:-1] + (in_stream.shape[-1] * in_stream.stream_dtype.shape[1],)
+            output_stream_shape = in_stream.shape[:-1] + (
+                in_stream.shape[-1] * in_stream.stream_dtype.shape[1],
+            )
             output_stream_dtype = Tile(
                 shape=(in_stream.stream_dtype.shape[0], 1),
                 tile_dtype=in_stream.stream_dtype.tile_dtype,
@@ -1444,7 +1457,6 @@ class RetileStreamify(StepOps):
         )
         input_node = input if isinstance(input, StepOps) else input[0]
         graph.add_edge(input_node, self)
-
 
     @property
     def stream(self) -> Stream:

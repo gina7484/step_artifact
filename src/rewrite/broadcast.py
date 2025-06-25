@@ -79,9 +79,9 @@ def infer_broadcast(graph: nx.MultiDiGraph) -> nx.MultiDiGraph:
             broadcast = Broadcast(
                 graph=graph, input=src_node, num_consumers=len(dst_node_list)
             )
-            print(
-                f"Broadcasting {src_node} to {len(dst_node_list)} consumers: {dst_node_list}"
-            )
+            # print(
+            #     f"Broadcasting {src_node} to {len(dst_node_list)} consumers: {dst_node_list}"
+            # )
 
             # Update the downstream nodes
             for idx, dst_node in enumerate(dst_node_list):
