@@ -55,6 +55,14 @@ class PrinterContext(StepOps):
             raise ValueError("The shape of the input stream shouldn't change")
         self._input = new_input
 
+    def off_chip_traffic(self) -> int:
+        """Return the off-chip traffic for this operation."""
+        return 0
+
+    def on_chip_requirement(self, count_fifos: bool = False) -> int:
+        """Return the on-chip memory requirement for this operation."""
+        return 0
+
 
 class ConsumerContext(StepOps):
     _input: Union[StepOps, Tuple[StepOps, int]]
@@ -103,6 +111,14 @@ class ConsumerContext(StepOps):
         if get_stream(self.input) != get_stream(new_input):
             raise ValueError("The shape of the input stream shouldn't change")
         self._input = new_input
+
+    def off_chip_traffic(self) -> int:
+        """Return the off-chip traffic for this operation."""
+        return 0
+
+    def on_chip_requirement(self, count_fifos: bool = False) -> int:
+        """Return the on-chip memory requirement for this operation."""
+        return 0
 
 
 class SelectGen(StepOps):
@@ -156,3 +172,11 @@ class SelectGen(StepOps):
         raise NotImplementedError(
             "Shouldn't be called for nodes that doesn't have an input stream"
         )
+
+    def off_chip_traffic(self) -> int:
+        """Return the off-chip traffic for this operation."""
+        return 0
+
+    def on_chip_requirement(self, count_fifos: bool = False) -> int:
+        """Return the on-chip memory requirement for this operation."""
+        return 0

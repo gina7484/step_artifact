@@ -66,6 +66,16 @@ class StepOps(ABC):
     ):
         pass
 
+    @abstractmethod
+    def on_chip_requirement(self, count_fifos: bool = False) -> int:
+        """Return the on-chip memory requirement for this operation."""
+        pass
+
+    @abstractmethod
+    def off_chip_traffic(self) -> int:
+        """Return the off-chip traffic (bytes) for this operation."""
+        pass
+
 
 class OffChipLoad(StepOps):
     underlying: torch.Tensor
@@ -164,6 +174,20 @@ class OffChipLoad(StepOps):
         raise NotImplementedError(
             "Shouldn't be called for nodes that doesn't have an input stream"
         )
+
+    def off_chip_traffic(self) -> int:
+        """Return the off-chip traffic for this operation."""
+        # OffChipLoad transfers data from off-chip to on-chip
+        total_elements = 1
+        for dim in self.out_shape_tiled:
+            total_elements *= dim
+        
+        # Multiply by tile dimensions and bytes per element
+        return total_elements * self.tile_row * self.tile_col * self.n_byte
+
+    def on_chip_requirement(self, count_fifos: bool = False) -> int:
+        """Return the on-chip memory requirement for this operation."""
+        return self.tile_row * self.tile_col * self.n_byte
 
 
 class DynOffChipLoad(StepOps):
@@ -269,6 +293,19 @@ class DynOffChipLoad(StepOps):
             raise ValueError("The shape of the input stream shouldn't change")
         self.ref = new_input
 
+    def off_chip_traffic(self) -> int:
+        """Return the off-chip traffic for this operation."""
+        # Calculate the total number of elements in the stream
+        total_elements = 1
+        for dim in self._stream.shape:
+            total_elements *= dim
+        
+        # Multiply by tile dimensions and bytes per element
+        return total_elements * self.tile_row * self.tile_col * self.n_byte
+    
+    def on_chip_requirement(self, count_fifos: bool = False) -> int:
+        """Return the on-chip memory requirement for this operation."""
+        return self.tile_row * self.tile_col * self.n_byte
 
 class RepeatStatic(StepOps):
     _input: Union[StepOps, Tuple[StepOps, int]]
@@ -328,6 +365,14 @@ class RepeatStatic(StepOps):
         if get_stream(self.input) != get_stream(new_input):
             raise ValueError("The shape of the input stream shouldn't change")
         self._input = new_input
+
+    def off_chip_traffic(self) -> int:
+        """Return the off-chip traffic for this operation."""
+        return 0
+
+    def on_chip_requirement(self, count_fifos: bool = False) -> int:
+        """Return the on-chip memory requirement for this operation."""
+        return 0
 
 
 class Promote(StepOps):
@@ -390,6 +435,14 @@ class Promote(StepOps):
         if get_stream(self.input) != get_stream(new_input):
             raise ValueError("The shape of the input stream shouldn't change")
         self._input = new_input
+
+    def off_chip_traffic(self) -> int:
+        """Return the off-chip traffic for this operation."""
+        return 0
+
+    def on_chip_requirement(self, count_fifos: bool = False) -> int:
+        """Return the on-chip memory requirement for this operation."""
+        return 0
 
 
 class BinaryMap(StepOps):
@@ -481,6 +534,26 @@ class BinaryMap(StepOps):
             self.in2 = new_input
         else:
             raise ValueError("Wrong org_input")
+
+    def off_chip_traffic(self) -> int:
+        """Return the off-chip traffic for this operation."""
+        return 0
+
+    def on_chip_requirement(self, count_fifos: bool = False) -> int:
+        """Return the on-chip memory requirement for this operation."""
+        if not count_fifos:
+            return 0
+        
+        # Get streams for inputs
+        in1_stream = get_stream(self.in1)
+        in2_stream = get_stream(self.in2)
+        
+        # Calculate tile sizes in bytes for each stream
+        in1_tile_size = in1_stream.stream_dtype.shape[0] * in1_stream.stream_dtype.shape[1] * in1_stream.stream_dtype.tile_dtype.size_in_bytes()
+        in2_tile_size = in2_stream.stream_dtype.shape[0] * in2_stream.stream_dtype.shape[1] * in2_stream.stream_dtype.tile_dtype.size_in_bytes()
+        output_tile_size = self._stream.stream_dtype.shape[0] * self._stream.stream_dtype.shape[1] * self._stream.stream_dtype.tile_dtype.size_in_bytes()
+        
+        return in1_tile_size + in2_tile_size + output_tile_size
 
 
 class BinaryMapAccum(StepOps):
@@ -578,6 +651,27 @@ class BinaryMapAccum(StepOps):
         else:
             raise ValueError("Wrong org_input")
 
+    def off_chip_traffic(self) -> int:
+        """Return the off-chip traffic for this operation."""
+        return 0
+
+    def on_chip_requirement(self, count_fifos: bool = False) -> int:
+        """Return the on-chip memory requirement for this operation."""
+        if not count_fifos:
+            return 0
+        
+        # Get the first input stream (all inputs should have the same datatype)
+        in_stream = get_stream(self.in1)
+        
+        # Check that the input stream's datatype is a Tile
+        assert isinstance(in_stream.stream_dtype, Tile), "Input stream must be a Tile type."
+        
+        # Calculate the size of the input stream's datatype
+        in_tile_size = in_stream.stream_dtype.shape[0] * in_stream.stream_dtype.shape[1] * in_stream.stream_dtype.tile_dtype.size_in_bytes()
+        
+        # Return the size times (len(self._inputs) + 1) for FIFO requirements
+        return in_tile_size * (len(self._inputs) + 1)
+
 
 class Broadcast(StepOps):
     _input: Union[StepOps, Tuple[StepOps, int]]
@@ -637,6 +731,14 @@ class Broadcast(StepOps):
         if get_stream(self.input) != get_stream(new_input):
             raise ValueError("The shape of the input stream shouldn't change")
         self._input = new_input
+
+    def off_chip_traffic(self) -> int:
+        """Return the off-chip traffic for this operation."""
+        return 0
+
+    def on_chip_requirement(self, count_fifos: bool = False) -> int:
+        """Return the on-chip memory requirement for this operation."""
+        return 0
 
 
 class OffChipStore(StepOps):
@@ -710,19 +812,29 @@ class OffChipStore(StepOps):
             raise ValueError("The shape of the input stream shouldn't change")
         self._input = new_input
 
+    def off_chip_traffic(self) -> int:
+        """Return the off-chip traffic for this operation."""
+        return 0
+
+    def on_chip_requirement(self, count_fifos: bool = False) -> int:
+        """Return the on-chip memory requirement for this operation."""
+        return 0
+
 
 class Bufferize(StepOps):
     _input: Union[StepOps, Tuple[StepOps, int]]
     rank: int
+    off_chip: bool
     _stream: Stream
 
     def __init__(
-        self, graph: MultiDiGraph, input: Union[StepOps, Tuple[StepOps, int]], rank: int
+        self, graph: MultiDiGraph, input: Union[StepOps, Tuple[StepOps, int]], rank: int, off_chip: bool = False
     ):
         super().__init__()
 
         self._input = input
         self.rank = rank
+        self.off_chip = off_chip
 
         in_stream: Stream = get_stream(input)
         assert rank > 0, "Rank must be greater than 0."
@@ -773,6 +885,44 @@ class Bufferize(StepOps):
         if get_stream(self.input) != get_stream(new_input):
             raise ValueError("The shape of the input stream shouldn't change")
         self._input = new_input
+
+    def off_chip_traffic(self) -> int:
+        """Return the off-chip traffic for this operation."""
+        if not self.off_chip:
+            return 0
+        
+        # Get the input stream
+        in_stream = get_stream(self._input)
+        
+        # Check that the input stream's datatype is a Tile
+        assert isinstance(in_stream.stream_dtype, Tile), "Input stream must be a Tile type."
+        
+        # Calculate the total number of elements in the input stream
+        total_elements = 1
+        for dim in in_stream.shape:
+            total_elements *= dim
+        
+        # Calculate the size of the input stream's datatype
+        in_tile_size = in_stream.stream_dtype.shape[0] * in_stream.stream_dtype.shape[1] * in_stream.stream_dtype.tile_dtype.size_in_bytes()
+        
+        return total_elements * in_tile_size
+
+    def on_chip_requirement(self, count_fifos: bool = False) -> int:
+        """Return the on-chip memory requirement for this operation."""
+        if not count_fifos:
+            return 0
+        
+        # Get the input stream
+        in_stream = get_stream(self._input)
+        
+        # Check that the input stream's datatype is a Tile
+        assert isinstance(in_stream.stream_dtype, Tile), "Input stream must be a Tile type."
+        
+        # Calculate the size of the input stream's datatype
+        in_tile_size = in_stream.stream_dtype.shape[0] * in_stream.stream_dtype.shape[1] * in_stream.stream_dtype.tile_dtype.size_in_bytes()
+        
+        # Return the size times (num_consumers + 1) for FIFO requirements
+        return in_tile_size * (self.num_consumers + 1)
 
 
 class Streamify(StepOps):
@@ -844,6 +994,14 @@ class Streamify(StepOps):
         if get_stream(self.input) != get_stream(new_input):
             raise ValueError("The shape of the input stream shouldn't change")
         self._input = new_input
+
+    def off_chip_traffic(self) -> int:
+        """Return the off-chip traffic for this operation."""
+        return 0
+
+    def on_chip_requirement(self, count_fifos: bool = False) -> int:
+        """Return the on-chip memory requirement for this operation."""
+        return 0
 
 
 class DynStreamify(StepOps):
@@ -941,6 +1099,14 @@ class DynStreamify(StepOps):
         else:
             raise ValueError("Wrong org_input")
 
+    def off_chip_traffic(self) -> int:
+        """Return the off-chip traffic for this operation."""
+        return 0
+
+    def on_chip_requirement(self, count_fifos: bool = False) -> int:
+        """Return the on-chip memory requirement for this operation."""
+        return 0
+
 
 class FlatPartition(StepOps):
     _input: Union[StepOps, Tuple[StepOps, int]]
@@ -1027,6 +1193,27 @@ class FlatPartition(StepOps):
             self.control = new_input
         else:
             raise ValueError("Wrong org_input")
+
+    def off_chip_traffic(self) -> int:
+        """Return the off-chip traffic for this operation."""
+        return 0
+
+    def on_chip_requirement(self, count_fifos: bool = False) -> int:
+        """Return the on-chip memory requirement for this operation."""
+        if not count_fifos:
+            return 0
+        
+        # Get the input stream
+        in_stream = get_stream(self._input)
+        
+        # Check that the input stream's datatype is a Tile
+        assert isinstance(in_stream.stream_dtype, Tile), "Input stream must be a Tile type."
+        
+        # Calculate the size of the input stream's datatype
+        in_tile_size = in_stream.stream_dtype.shape[0] * in_stream.stream_dtype.shape[1] * in_stream.stream_dtype.tile_dtype.size_in_bytes()
+        
+        # Return the size times (num_consumers + 1) for FIFO requirements
+        return in_tile_size * (self.num_consumers + 1)
 
 
 class FlatReassemble(StepOps):
@@ -1122,6 +1309,27 @@ class FlatReassemble(StepOps):
         else:
             raise ValueError("Wrong org_input")
 
+    def off_chip_traffic(self) -> int:
+        """Return the off-chip traffic for this operation."""
+        return 0
+
+    def on_chip_requirement(self, count_fifos: bool = False) -> int:
+        """Return the on-chip memory requirement for this operation."""
+        if not count_fifos:
+            return 0
+        
+        # Get the first input stream (all inputs should have the same datatype)
+        in_stream = get_stream(self._inputs[0])
+        
+        # Check that the input stream's datatype is a Tile
+        assert isinstance(in_stream.stream_dtype, Tile), "Input stream must be a Tile type."
+        
+        # Calculate the size of the input stream's datatype
+        in_tile_size = in_stream.stream_dtype.shape[0] * in_stream.stream_dtype.shape[1] * in_stream.stream_dtype.tile_dtype.size_in_bytes()
+        
+        # Return the size times (len(self._inputs) + 1) for FIFO requirements
+        return in_tile_size * (len(self._inputs) + 1)
+
 
 class UnaryMap(StepOps):
     _input: Union[StepOps, Tuple[StepOps, int]]
@@ -1189,6 +1397,24 @@ class UnaryMap(StepOps):
         if get_stream(self._input) != get_stream(new_input):
             raise ValueError("The shape of the input stream shouldn't change")
         self._input = new_input
+
+    def off_chip_traffic(self) -> int:
+        """Return the off-chip traffic for this operation."""
+        return 0
+
+    def on_chip_requirement(self, count_fifos: bool = False) -> int:
+        """Return the on-chip memory requirement for this operation."""
+        if not count_fifos:
+            return 0
+        
+        # Get stream for input
+        in_stream = get_stream(self._input)
+        
+        # Calculate tile sizes in bytes for each stream
+        in_tile_size = in_stream.stream_dtype.shape[0] * in_stream.stream_dtype.shape[1] * in_stream.stream_dtype.tile_dtype.size_in_bytes()
+        output_tile_size = self._stream.stream_dtype.shape[0] * self._stream.stream_dtype.shape[1] * self._stream.stream_dtype.tile_dtype.size_in_bytes()
+        
+        return in_tile_size + output_tile_size
 
 
 class Accum(StepOps):
@@ -1265,6 +1491,14 @@ class Accum(StepOps):
         if get_stream(self._input) != get_stream(new_input):
             raise ValueError("The shape of the input stream shouldn't change")
         self._input = new_input
+
+    def off_chip_traffic(self) -> int:
+        """Return the off-chip traffic for this operation."""
+        return 0
+
+    def on_chip_requirement(self, count_fifos: bool = False) -> int:
+        """Return the on-chip memory requirement for this operation."""
+        return 0
 
 
 class Flatten(StepOps):
@@ -1350,6 +1584,14 @@ class Flatten(StepOps):
             raise ValueError("The shape of the input stream shouldn't change")
         self._input = new_input
 
+    def off_chip_traffic(self) -> int:
+        """Return the off-chip traffic for this operation."""
+        return 0
+
+    def on_chip_requirement(self, count_fifos: bool = False) -> int:
+        """Return the on-chip memory requirement for this operation."""
+        return 0
+
 
 class Reshape(StepOps):
     _input: Union[StepOps, Tuple[StepOps, int]]
@@ -1417,6 +1659,14 @@ class Reshape(StepOps):
         if get_stream(self.input) != get_stream(new_input):
             raise ValueError("The shape of the input stream shouldn't change")
         self._input = new_input
+
+    def off_chip_traffic(self) -> int:
+        """Return the off-chip traffic for this operation."""
+        return 0
+
+    def on_chip_requirement(self, count_fifos: bool = False) -> int:
+        """Return the on-chip memory requirement for this operation."""
+        return 0
 
 
 class RetileStreamify(StepOps):
@@ -1492,3 +1742,11 @@ class RetileStreamify(StepOps):
         if get_stream(self.input) != get_stream(new_input):
             raise ValueError("The shape of the input stream shouldn't change")
         self._input = new_input
+
+    def off_chip_traffic(self) -> int:
+        """Return the off-chip traffic for this operation."""
+        return 0
+
+    def on_chip_requirement(self, count_fifos: bool = False) -> int:
+        """Return the on-chip memory requirement for this operation."""
+        return 0
