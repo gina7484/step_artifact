@@ -20,7 +20,7 @@ class HBMConfig:
 
 
 def simulate(
-    graph: List[StepOps],
+    graph: MultiDiGraph,
     logging: bool,
     hbm_config: HBMConfig,
     protobuf_file: str,
@@ -36,8 +36,10 @@ def simulate(
 
 
 # pylint: disable=no-member
-def to_pb_elem_to_elem_func(op_fn: map_fn.MapFn) -> func_pb2.ElemtoElemFunc:
-    func_pb = func_pb2.ElemtoElemFunc()
+def to_pb_elem_to_elem_func(
+    op_fn: map_fn.MapFn,
+) -> func_pb2.ElemtoElemFunc:  # pylint: disable=no-member
+    func_pb = func_pb2.ElemtoElemFunc()  # pylint: disable=no-member
     if isinstance(op_fn, map_fn.Matmul):
         map_fn_pb = func_pb2.Matmul()
         map_fn_pb.weight_transposed = op_fn.weight_transposed

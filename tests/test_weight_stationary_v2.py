@@ -62,15 +62,13 @@ def ws_tile_mn_mk_gemm(
     # - tensor shape: [B, n_routed_experts]
     # - stream shape: [1, B] (tile: Multihot)
     feature_select_gen = SelectGen(
-        is_multihot=True,
-        tensor=expert_multihot,
+        is_multihot=True, tensor=expert_multihot, n=model_config.n_routed_experts
     )
 
     # - tensor shape: [B, n_activated_experts, n_routed_experts]
     # - stream shape: [1, B, n_activated_experts] (tile: Multihot)
     weight_select_gen = SelectGen(
-        is_multihot=True,
-        tensor=expert_onehot,
+        is_multihot=True, tensor=expert_onehot, n=model_config.n_activated_experts
     )
 
     # ------------ Stage 3: Load the weights for expert weighted sum ------------

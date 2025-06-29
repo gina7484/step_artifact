@@ -126,12 +126,12 @@ class SelectGen(StepOps):
     is_multihot: bool
     _stream: Stream
 
-    def __init__(self, is_multihot: bool, tensor: torch.Tensor):
+    def __init__(self, is_multihot: bool, tensor: torch.Tensor, n: int):
         super().__init__()
         self.is_multihot = is_multihot
         self.underlying = tensor
 
-        dtype = MultiHot() if is_multihot else Index()
+        dtype = MultiHot(n) if is_multihot else Index(n)
         self._stream = Stream(stream_dtype=dtype, shape=(1,) + tuple(tensor.shape[:-1]))
 
     @property

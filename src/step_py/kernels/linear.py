@@ -69,10 +69,11 @@ def Linear(
             )
 
     # ================= Load weight =================
+
     formatted_weight = OffChipLoad(
         underlying=weight,
         stride=(0,) * len(outer_dims) + (1, N // tile_config.n),
-        out_shape_tiled=outer_dims
+        out_shape_tiled=outer_dims  # type:ignore
         + (
             N // tile_config.n,
             K // tile_config.k,

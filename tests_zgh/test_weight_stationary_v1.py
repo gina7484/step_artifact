@@ -92,12 +92,12 @@ def step_impl(
     expert_selection_one_hot = torch.nn.functional.one_hot(indices, E)
     weight_select_gen = SelectGen(
         is_multihot=True,
-        tensor=expert_selection_one_hot
+        tensor=expert_selection_one_hot,n=E
     ) # [1, N, n_activated]
     expert_selection_multi_hot = expert_selection_one_hot.sum(dim=-2)
     feature_select_gen = SelectGen(
         is_multihot=True,
-        tensor=expert_selection_multi_hot,
+        tensor=expert_selection_multi_hot,n=E
     )  # [1, N]
 
     # Stage 3: Load the weights

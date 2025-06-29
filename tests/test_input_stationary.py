@@ -27,7 +27,7 @@ def test_expert_selection_generation():
 
     select_gan = SelectGen(
         is_multihot=True,
-        tensor=expert_selection_multi_hot,
+        tensor=expert_selection_multi_hot,n=E
     )
 
     printer_context = PrinterContext(step_graph, select_gan)
@@ -94,7 +94,7 @@ def test_prefill_expert_mnk_mnk():
     print(f"Expert selection: \n{routing_expert_selection}")
     control = SelectGen(
         is_multihot=True,
-        tensor=routing_expert_selection,
+        tensor=routing_expert_selection,n=EXPERT
     )
     # [1, B, N]
     print(f"Control stream shape: {control.stream.shape}")

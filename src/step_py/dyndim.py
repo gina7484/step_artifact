@@ -1,9 +1,7 @@
-from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Union
 import sympy
 
 
-@dataclass
 class DynDim:
     """
     A wrapper class around the dynamic dimensions.
@@ -14,34 +12,85 @@ class DynDim:
     symbolically.
     """
 
-    expr: sympy.Symbol
+    def __init__(self, name_or_expr: Union[str, sympy.Symbol]):
+        """
+        Initialize a DynDim with either a name (string) or an existing sympy.Symbol.
 
-    def __add__(self, other):
-        return DynDim(self.expr + other)
+        Args:
+            name_or_expr: Either a string name for the symbol, or an existing sympy.Symbol
+        """
+        if isinstance(name_or_expr, str):
+            # Create a new integer symbol with the given name
+            self.expr = sympy.Symbol(name_or_expr, integer=True, positive=True)
+        elif isinstance(name_or_expr, sympy.Symbol):
+            # Use the existing symbol (assume it has proper assumptions)
+            self.expr = name_or_expr
+        else:
+            raise TypeError(f"Expected str or sympy.Symbol, got {type(name_or_expr)}")
 
-    def __mul__(self, other):
-        return DynDim(self.expr * other)
+    def __add__(self, other: Union[int, "DynDim"]) -> "DynDim":
+        if isinstance(other, DynDim):
+            return DynDim(self.expr + other.expr).simplify()  # type: ignore
+        return DynDim(self.expr + other).simplify()  # type: ignore
 
-    def __sub__(self, other):
-        return DynDim(self.expr - other)
+    def __mul__(self, other: Union[int, "DynDim"]) -> "DynDim":
+        if isinstance(other, DynDim):
+            return DynDim(self.expr * other.expr).simplify()  # type: ignore
+        return DynDim(self.expr * other).simplify()  # type: ignore
 
-    def __floordiv__(self, other):
-        return DynDim(self.expr // other)
+    def __sub__(self, other: Union[int, "DynDim"]) -> "DynDim":
+        if isinstance(other, DynDim):
+            return DynDim(self.expr - other.expr).simplify()  # type: ignore
+        return DynDim(self.expr - other).simplify()  # type: ignore
 
-    def __mod__(self, other):
-        return DynDim(self.expr % other)
+    def __floordiv__(self, other: Union[int, "DynDim"]) -> "DynDim":
+        if isinstance(other, DynDim):
+            return DynDim(self.expr // other.expr).simplify()  # type: ignore
+        return DynDim(self.expr // other).simplify()  # type: ignore
 
-    def __iadd__(self, other):
-        self.expr += other
-        return self
+    def __mod__(self, other: Union[int, "DynDim"]) -> "DynDim":
+        if isinstance(other, DynDim):
+            return DynDim(self.expr % other.expr).simplify()  # type: ignore
+        return DynDim(self.expr % other).simplify()  # type: ignore
 
-    def __isub__(self, other):
-        self.expr -= other
-        return self
+    def __iadd__(self, other: Union[int, "DynDim"]) -> "DynDim":
+        if isinstance(other, DynDim):
+            self.expr += other.expr  # type: ignore
+            return self.simplify()
+        self.expr += other  # type: ignore
+        return self.simplify()
 
-    def __imul__(self, other):
-        self.expr *= other
-        return self
+    def __isub__(self, other: Union[int, "DynDim"]) -> "DynDim":
+        if isinstance(other, DynDim):
+            self.expr -= other.expr  # type: ignore
+            return self.simplify()
+        self.expr -= other  # type: ignore
+        return self.simplify()
 
-    def __repr__(self):
+    def __imul__(self, other: Union[int, "DynDim"]) -> "DynDim":
+        if isinstance(other, DynDim):
+            self.expr *= other.expr  # type: ignore
+            return self.simplify()
+        self.expr *= other  # type: ignore
+        return self.simplify()
+
+    def __ifloordiv__(self, other: Union[int, "DynDim"]) -> "DynDim":
+        if isinstance(other, DynDim):
+            self.expr //= other.expr  # type: ignore
+            return self.simplify()
+        self.expr //= other  # type: ignore
+        return self.simplify()
+
+    def __imod__(self, other: Union[int, "DynDim"]) -> "DynDim":
+        if isinstance(other, DynDim):
+            self.expr %= other.expr  # type: ignore
+            return self.simplify()
+        self.expr %= other  # type: ignore
+        return self.simplify()
+
+    def __repr__(self) -> str:
         return str(self.expr)
+
+    def simplify(self) -> "DynDim":
+        self.expr = sympy.simplify(self.expr)
+        return self
