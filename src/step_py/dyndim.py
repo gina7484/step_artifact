@@ -12,7 +12,9 @@ class DynDim:
     symbolically.
     """
 
-    def __init__(self, name_or_expr: Union[str, sympy.Symbol]):
+    expr: sympy.Expr
+
+    def __init__(self, name_or_expr: Union[str, sympy.Expr]):
         """
         Initialize a DynDim with either a name (string) or an existing sympy.Symbol.
 
@@ -22,11 +24,11 @@ class DynDim:
         if isinstance(name_or_expr, str):
             # Create a new integer symbol with the given name
             self.expr = sympy.Symbol(name_or_expr, integer=True, positive=True)
-        elif isinstance(name_or_expr, sympy.Symbol):
+        elif isinstance(name_or_expr, (sympy.Expr)):
             # Use the existing symbol (assume it has proper assumptions)
             self.expr = name_or_expr
         else:
-            raise TypeError(f"Expected str or sympy.Symbol, got {type(name_or_expr)}")
+            raise TypeError(f"Expected str or sympy.Expr, got {type(name_or_expr)}")
 
     def __add__(self, other: Union[int, "DynDim"]) -> "DynDim":
         if isinstance(other, DynDim):

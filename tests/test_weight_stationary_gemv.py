@@ -18,10 +18,11 @@ def ws_tile_mn_mk_gemv(
     model_config,
     batch: int,
     gate_compute_bw: int,
-    up_compute_bw,
-    act_fn_compute_bw,
-    mult_compute_bw,
-    down_compute_bw,
+    up_compute_bw: int,
+    act_fn_compute_bw: int,
+    mult_compute_bw: int,
+    down_compute_bw: int,
+    weight_scale_compute_bw: int,
     input_tensor: torch.Tensor,
     expert_multihot: torch.Tensor,
     expert_onehot: torch.Tensor,
@@ -305,7 +306,7 @@ def ws_tile_mn_mk_gemv(
             down_feature_streams[i],
             map_fn.Mul(),
             False,
-            1024,
+            weight_scale_compute_bw,
         )
         for i in range(model_config.n_routed_experts)
     ]
@@ -317,10 +318,12 @@ def ws_tile_mn_mk_gemv_revet(
     model_config,
     batch: int,
     gate_compute_bw: int,
-    up_compute_bw,
-    act_fn_compute_bw,
-    mult_compute_bw,
-    down_compute_bw,
+    up_compute_bw: int,
+    act_fn_compute_bw: int,
+    mult_compute_bw: int,
+    down_compute_bw: int,
+    weight_scale_compute_bw: int,
+    accum_compute_bw: int,
     input_tensor: torch.Tensor,
     expert_multihot: torch.Tensor,
     expert_onehot: torch.Tensor,
@@ -346,6 +349,7 @@ def ws_tile_mn_mk_gemv_revet(
         act_fn_compute_bw,
         mult_compute_bw,
         down_compute_bw,
+        weight_scale_compute_bw,
         input_tensor,
         expert_multihot,
         expert_onehot,
@@ -381,7 +385,7 @@ def ws_tile_mn_mk_gemv_revet(
         init_fn.Zero(shape=(1, D), dtype=Float32()),
         1,
         True,
-        mult_compute_bw,
+        accum_compute_bw,
     )
 
     # ------------ Stage 17: Store the output ------------
@@ -450,6 +454,8 @@ def ws_tile_mn_mk_gemv_reassemble(
     act_fn_compute_bw,
     mult_compute_bw,
     down_compute_bw,
+    weight_scale_compute_bw,
+    accum_compute_bw,
     input_tensor: torch.Tensor,
     expert_multihot: torch.Tensor,
     expert_onehot: torch.Tensor,
@@ -474,6 +480,7 @@ def ws_tile_mn_mk_gemv_reassemble(
         act_fn_compute_bw,
         mult_compute_bw,
         down_compute_bw,
+        weight_scale_compute_bw,
         input_tensor,
         expert_multihot,
         expert_onehot,
@@ -509,7 +516,7 @@ def ws_tile_mn_mk_gemv_reassemble(
         init_fn.Zero(shape=(1, D), dtype=Float32()),
         1,
         True,
-        mult_compute_bw,
+        accum_compute_bw,
     )
 
     # ------------ Stage 17: Store the output ------------
@@ -587,6 +594,8 @@ def test_deepseekv3_ws_tile_mn_mk():
     ACT_FN_COMPUTE_BW = 1022
     MULT_COMPUTE_BW = 1022
     DOWN_COMPUTE_BW = 1022
+    WEIGHT_SCALE_COMPUTE_BW = 1022
+    ACCUM_COMPUTE_BW = 1022
 
     # ------------ Input generation ------------
     input_tensor = torch.randn(B, model_config.dim)
@@ -655,6 +664,8 @@ def test_deepseekv3_ws_tile_mn_mk():
                 act_fn_compute_bw=ACT_FN_COMPUTE_BW,
                 mult_compute_bw=MULT_COMPUTE_BW,
                 down_compute_bw=DOWN_COMPUTE_BW,
+                weight_scale_compute_bw=WEIGHT_SCALE_COMPUTE_BW,
+                accum_compute_bw=ACCUM_COMPUTE_BW,
                 input_tensor=input_tensor,
                 expert_multihot=expert_multihot,
                 expert_onehot=expert_onehot,
@@ -679,6 +690,8 @@ def test_deepseekv3_ws_tile_mn_mk():
             act_fn_compute_bw=ACT_FN_COMPUTE_BW,
             mult_compute_bw=MULT_COMPUTE_BW,
             down_compute_bw=DOWN_COMPUTE_BW,
+            weight_scale_compute_bw=WEIGHT_SCALE_COMPUTE_BW,
+            accum_compute_bw=ACCUM_COMPUTE_BW,
             input_tensor=input_tensor,
             expert_multihot=expert_multihot,
             expert_onehot=expert_onehot,

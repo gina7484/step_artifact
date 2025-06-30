@@ -22,7 +22,7 @@ def get_stream(input: Union["StepOps", Tuple["StepOps", int]]) -> Stream:
         input_node, stream_idx = input
         return input_node.stream_idx(stream_idx)
     else:
-        raise TypeError("Wrong input type!")
+        raise TypeError(f"Wrong input type! Input: {input} (type:{type(input)})")
 
 
 class StepOps(ABC):
@@ -1261,11 +1261,13 @@ class FlatPartition(StepOps):
 
         in_stream: Stream = get_stream(input)
         # [Genghan] A trick: StepOps should use the same control_node to align the outermost dimension
-        new_names = sympy.symbols(f"{str(control_node)}_0:{num_consumers}")
+        new_names = sympy.symbols(
+            f"{str(control_node)}_0:{num_consumers}", integer=True, positive=True
+        )
         self._stream = [
             Stream(
                 stream_dtype=in_stream.stream_dtype,
-                shape=(new_names[i],)
+                shape=(DynDim(new_names[i]),)
                 + in_stream.shape[len(in_stream.shape) - partition_rank :],
             )
             for i in range(num_consumers)
@@ -1370,7 +1372,7 @@ class FlatReassemble(StepOps):
             for stream in in_streams
         ), "All input streams must have the same shape for the last 'reassemble_rank' dimensions."
         control_stream: Stream = get_stream(control)
-        new_name = DynDim(sympy.Symbol(f"{str(self)}_dyn"))
+        new_name = DynDim(f"{str(self)}_dyn")
         self._stream = Stream(
             stream_dtype=in_streams[0].stream_dtype,
             shape=control_stream.shape
@@ -1778,6 +1780,10 @@ class Reshape(StepOps):
                 + ((in_stream.shape[rank_pos] + chunk_size - 1) // chunk_size,)
                 + (chunk_size,)
                 + in_stream.shape[(rank_pos + 1) :],
+            )
+        else:
+            raise ValueError(
+                f"Unsupported shape type at rank {rank_pos}: {in_stream.shape[rank_pos]} (type: {type(in_stream.shape[rank_pos])})"
             )
 
         input_node = input if isinstance(input, StepOps) else input[0]
