@@ -1675,7 +1675,9 @@ class Flatten(StepOps):
         input_node = input if isinstance(input, StepOps) else input[0]
         graph.add_edge(input_node, self)
 
-    def _compute_flattened_shape(self, shape, min_rank, max_rank):
+    def _compute_flattened_shape(
+        self, shape: Tuple[int | DynDim, ...], min_rank, max_rank
+    ):
         # Convert ranks to indices (rank 0 = rightmost = highest index)
         min_index = len(shape) - 1 - max_rank  # Note: max_rank gives min_index
         max_index = len(shape) - 1 - min_rank  # Note: min_rank gives max_index
@@ -1685,9 +1687,12 @@ class Flatten(StepOps):
             raise ValueError("Invalid rank range")
 
         # Calculate merged dimension
-        merged_dim = 1
+        merged_dim: Union[int, DynDim] = 1
         for i in range(min_index, max_index + 1):
-            merged_dim *= shape[i]
+            if isinstance(shape[i], DynDim):
+                merged_dim = shape[i] * merged_dim
+            else:
+                merged_dim = merged_dim * shape[i]
 
         # Build new shape
         new_shape = shape[:min_index] + (merged_dim,) + shape[max_index + 1 :]
@@ -1747,6 +1752,7 @@ class Reshape(StepOps):
     _input: Union[StepOps, Tuple[StepOps, int]]
     chunk_size: int
     reshape_rank: int
+    pad_fn: InitFn
     _stream: Stream
 
     def __init__(
@@ -1755,15 +1761,19 @@ class Reshape(StepOps):
         input: Union[StepOps, Tuple[StepOps, int]],
         chunk_size: int,
         reshape_rank: int,
+        pad_fn: InitFn,
     ):
         super().__init__()
         self._input = input
         self.chunk_size = chunk_size
         self.reshape_rank = reshape_rank
+        self.pad_fn = pad_fn
+
         in_stream: Stream = get_stream(input)
         assert (
             reshape_rank >= 0 and reshape_rank <= in_stream.rank
         ), f"Reshape rank must be between 0 and {in_stream.rank}."
+
         rank_pos = in_stream.rank - reshape_rank
         if isinstance(in_stream.shape[rank_pos], DynDim):
             self._stream = Stream(
@@ -1838,10 +1848,10 @@ class Reshape(StepOps):
         return sympy.simplify(sympy.Mul(stream_size, sympy.Integer(2)))
 
 
-'''
 class RetileStreamify(StepOps):
     _input: Union[StepOps, Tuple[StepOps, int]]
     split_row: bool
+    filter_mask: bool
     _stream: Stream
 
     def __init__(
@@ -1849,27 +1859,56 @@ class RetileStreamify(StepOps):
         graph: MultiDiGraph,
         input: Union[StepOps, Tuple[StepOps, int]],
         split_row: bool,
+        filter_mask: bool = False,
     ):
         super().__init__()
         self._input = input
         self.split_row = split_row
+        self.filter_mask = filter_mask
         in_stream: Stream = get_stream(input)
+
+        assert isinstance(
+            in_stream.stream_dtype, Tile
+        ), "Input stream must be a Tile type."
+
         if split_row:
-            output_stream_shape = in_stream.shape[:-1] + (
-                in_stream.shape[-1] * in_stream.stream_dtype.shape[0],
-            )
-            output_stream_dtype = Tile(
-                shape=(1, in_stream.stream_dtype.shape[1]),
-                tile_dtype=in_stream.stream_dtype.tile_dtype,
-            )
+            in_stream_tile: Tile = in_stream.stream_dtype
+            if filter_mask:
+                output_stream_shape = in_stream.shape[:-1] + (
+                    DynDim(f"{str(self)}_dyn"),
+                )
+                output_stream_dtype = Tile(
+                    shape=(1, in_stream_tile.shape[1]),
+                    tile_dtype=in_stream_tile.tile_dtype,
+                )
+
+            else:
+                output_stream_shape = in_stream.shape[:-1] + (
+                    in_stream.shape[-1] * in_stream_tile.shape[0],
+                )
+                output_stream_dtype = Tile(
+                    shape=(1, in_stream_tile.shape[1]),
+                    tile_dtype=in_stream_tile.tile_dtype,
+                )
+
         else:
-            output_stream_shape = in_stream.shape[:-1] + (
-                in_stream.shape[-1] * in_stream.stream_dtype.shape[1],
-            )
-            output_stream_dtype = Tile(
-                shape=(in_stream.stream_dtype.shape[0], 1),
-                tile_dtype=in_stream.stream_dtype.tile_dtype,
-            )
+            in_stream_tile: Tile = in_stream.stream_dtype
+            if filter_mask:
+                output_stream_shape = in_stream.shape[:-1] + (
+                    DynDim(f"{str(self)}_dyn"),
+                )
+                output_stream_dtype = Tile(
+                    shape=(in_stream.stream_dtype.shape[0], 1),
+                    tile_dtype=in_stream_tile.tile_dtype,
+                )
+            else:
+                output_stream_shape = in_stream.shape[:-1] + (
+                    in_stream.shape[-1] * in_stream_tile.shape[1],
+                )
+                output_stream_dtype = Tile(
+                    shape=(in_stream.stream_dtype.shape[0], 1),
+                    tile_dtype=in_stream_tile.tile_dtype,
+                )
 
         self._stream = Stream(
             stream_dtype=output_stream_dtype,
@@ -1920,5 +1959,3 @@ class RetileStreamify(StepOps):
     def on_chip_requirement(self, count_fifos: bool = False) -> sympy.Expr:
         """Return the on-chip memory requirement for this operation."""
         return sympy.Integer(0)
-
-'''

@@ -32,7 +32,7 @@ def ws_tile_mn_mk_gemm_reshape(
     w_down_list: list[torch.Tensor],
     tile_N: int,  # M
     tile_F: int,  # Gate & Up (K), Down (N)
-):
+) -> OffChipStore:
     F = model_config.moe_inter_dim
     D = model_config.dim
 
@@ -108,7 +108,13 @@ def ws_tile_mn_mk_gemm_reshape(
     expert_feature_streams = [
         Accum(
             step_graph,
-            Reshape(step_graph, (unchunked_expert_feature_streams, i), tile_N, 0),
+            Reshape(
+                step_graph,
+                (unchunked_expert_feature_streams, i),
+                tile_N,
+                0,
+                init_fn.Zero(shape=(1, D), dtype=Float32()),
+            ),
             Tile(tile_dtype=Float32(), shape=(tile_N, D)),
             map_fn.RetileRow(),
             init_fn.Empty(shape=(0, D), dtype=Float32()),
@@ -285,7 +291,7 @@ def ws_tile_mn_mk_gemm_reshape(
     # - input stream shape:   [(Dyn + tile_N -1) // tile_N, F // tile_F] (tile: [tile_N, tile_F])
     # - weight stream shape:  [(Dyn + tile_N -1) // tile_N, F // tile_F] (tile: [tile_F, D])
     # - output stream shape:  [(Dyn + tile_N -1) // tile_N]              (tile: [tile_N, D])
-    down_feature_streams = [
+    chunked_down_feature_streams = [
         BinaryMapAccum(
             step_graph,
             feature,
@@ -299,12 +305,32 @@ def ws_tile_mn_mk_gemm_reshape(
         for feature, weight in zip(projected_feature_streams, ready_down_loads)
     ]
 
+    # - input stream shape:  [(Dyn + tile_N -1) // tile_N] (tile: [tile_N, D])
+    # - output stream shape: [Dyn_retile]                  (tile: [1, D])
+    down_feature_streams = [
+        RetileStreamify(
+            graph=step_graph,
+            input=chunked_down_feature_streams[i],
+            split_row=True,
+            filter_mask=True,
+        )
+        for i in range(model_config.n_routed_experts)
+    ]
+
+    # Replace the Dyndim with the actual value
+    for partitioned_stream, retiled_stream in zip(
+        unchunked_expert_feature_streams.stream_list, down_feature_streams
+    ):
+        dyn_i = partitioned_stream.stream_dtype.shape[0]
+        retiled_stream.stream.shape = (dyn_i,)
+
     # ------------ Stage 13: Partition the scalar weights ------------
     # - input stream shape:   [1, B] (tile: [1, 1])
     # - control stream shape: [1, B]
     # - partition_rank: 0
     # - output stream: [Dyn] x n_routed_experts (tile: [1, 1])
-    unchunked_expert_weight_streams = FlatPartition(
+
+    expert_weight_streams = FlatPartition(
         step_graph,
         weights_load,
         weight_select_gen,
@@ -314,32 +340,14 @@ def ws_tile_mn_mk_gemm_reshape(
         num_consumers=model_config.n_routed_experts,
     )
 
-    # - input stream shape: [Dyn] x n_routed_experts (tile: [1, 1])
-    # - output stream:
-    #   - After Reshape: [(Dyn + tile_N -1) // tile_N, tile_N] x n_routed_experts (tile: [1, 1])
-    #   - After Accum:   [(Dyn + tile_N -1) // tile_N]         x n_routed_experts (tile: [tile_N, 1])
-    expert_weight_streams = [
-        Accum(
-            step_graph,
-            Reshape(step_graph, (unchunked_expert_weight_streams, i), tile_N, 0),
-            Tile(tile_dtype=Float32(), shape=(tile_N, 1)),
-            map_fn.RetileRow(),
-            init_fn.Empty(shape=(0, 1), dtype=Float32()),
-            1,  # rank
-            False,  # write_back_mu
-            accum_compute_bw,  # TODO: we might have to give a memory related bw instead of compute bw here
-        )
-        for i in range(model_config.n_routed_experts)
-    ]
-
     # ------------ Stage 14: Compute the weighted features ------------
-    # - input1 stream shape:   [(Dyn + tile_N -1) // tile_N] (tile: [tile_N, 1])
-    # - input2 stream shape:   [(Dyn + tile_N -1) // tile_N] (tile: [tile_N, D])
-    # - output stream shape:   [(Dyn + tile_N -1) // tile_N] (tile: [tile_N, D])
+    # - input1 stream shape:   [Dyn] (tile: [1, 1])
+    # - input2 stream shape:   [Dyn] (tile: [1, D])
+    # - output stream shape:   [Dyn] (tile: [1, D])
     weighted_feature_streams = [
         BinaryMap(
             step_graph,
-            expert_weight_streams[i],
+            (expert_weight_streams, i),
             down_feature_streams[i],
             map_fn.Mul(),
             False,
@@ -348,7 +356,38 @@ def ws_tile_mn_mk_gemm_reshape(
         for i in range(model_config.n_routed_experts)
     ]
 
-    return (weighted_feature_streams, feature_select_gen)
+    # ------------ Stage 15: Reassemble the weighted features ------------
+    # Reassemble
+    reassembled_stream = FlatReassemble(
+        step_graph,
+        weighted_feature_streams,  # [Dyn]
+        feature_select_gen,  # [1, N]
+        reassemble_rank=0,
+        switch_cycles=[1 for _ in range(model_config.n_routed_experts)],
+        write_back_mu=False,
+    )  # [1, N, Ragged]
+
+    # ------------ Stage 16: Accumulate the reassembled features ------------
+    accumed_stream = Accum(
+        step_graph,
+        reassembled_stream,  # [1, N, Ragged]
+        Tile(tile_dtype=Float32(), shape=(1, D)),
+        map_fn.Add(),
+        init_fn.Zero(shape=(1, D), dtype=Float32()),
+        1,
+        False,
+        accum_compute_bw,
+    )  # [1, N]
+
+    # ------------ Stage 17: Store the output ------------
+    output = OffChipStore(
+        step_graph,
+        accumed_stream,
+        par_dispatch=4,
+        store_file_name="output",
+    )  # [1, N]
+
+    return output
 
 
 def call_ws_tile_mn_mk_gemm_reshape(
