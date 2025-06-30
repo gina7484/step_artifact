@@ -1440,6 +1440,14 @@ class FlatReassemble(StepOps):
     def on_chip_requirement(self, count_fifos: bool = False) -> sympy.Expr:
         """Return the on-chip memory requirement for this operation."""
         if not count_fifos:
+            if self.write_back_mu:
+                reassembled_elements = sympy.Integer(1)
+                for dim in self._stream.shape[get_stream(self.control).rank - 1 :]:
+                    if isinstance(dim, DynDim):
+                        reassembled_elements *= dim.expr
+                    else:
+                        reassembled_elements *= dim
+                return reassembled_elements * self._stream.stream_dtype.size_in_bytes()
             return sympy.Integer(0)
 
         # Get the first input stream (all inputs should have the same datatype)
@@ -1453,7 +1461,22 @@ class FlatReassemble(StepOps):
         # Calculate the size of the input stream's datatype
         in_tile_size = in_stream.stream_dtype.size_in_bytes()
 
+        if self.write_back_mu:
+            reassembled_elements = sympy.Integer(1)
+            for dim in self._stream.shape[get_stream(self.control).rank - 1 :]:
+                if isinstance(dim, DynDim):
+                    reassembled_elements *= dim.expr
+                else:
+                    reassembled_elements *= dim
+            return sympy.simplify(
+                sympy.Add(
+                    sympy.Mul(in_tile_size, sympy.Integer(len(self._inputs) + 1)),
+                    reassembled_elements * self._stream.stream_dtype.size_in_bytes(),
+                )
+            )
+
         # Return the size times (len(self._inputs) + 1) for FIFO requirements
+
         return sympy.simplify(
             sympy.Mul(in_tile_size, sympy.Integer(len(self._inputs) + 1))
         )

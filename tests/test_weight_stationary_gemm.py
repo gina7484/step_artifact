@@ -1,5 +1,6 @@
 from networkx import MultiDiGraph
 import torch
+from step_py.datatype import DynTile
 from step_py.kernels.linear import LinearTileConfig
 from step_py.utility_ops import *
 from step_py.ops import *
@@ -457,23 +458,23 @@ def call_ws_tile_mn_mk_gemm_reshape(
         else:
             raise ValueError(f"Node {node} in the graph is not a StepOps")
 
-    # if simulate_rust:
-    #     if logging is None:
-    #         simulate(
-    #             step_graph,
-    #             False,  # logging
-    #             HBMConfig(64, 8, 2, 2, 1, 14),
-    #             "/home/ginasohn/step_tl/graph.pb",
-    #         )
-    #     else:
-    #         assert isinstance(logging, str), "Logging must be a string path"
-    #         simulate(
-    #             step_graph,
-    #             True,  # logging
-    #             HBMConfig(64, 8, 2, 2, 1, 14),
-    #             "/home/ginasohn/step_tl/graph.pb",
-    #             logging,
-    #         )
+    if simulate_rust:
+        if logging is None:
+            simulate(
+                step_graph,
+                False,  # logging
+                HBMConfig(64, 8, 2, 2, 1, 14),
+                "/home/ginasohn/step_tl/graph.pb",
+            )
+        else:
+            assert isinstance(logging, str), "Logging must be a string path"
+            simulate(
+                step_graph,
+                True,  # logging
+                HBMConfig(64, 8, 2, 2, 1, 14),
+                "/home/ginasohn/step_tl/graph.pb",
+                logging,
+            )
 
     return (
         output,
@@ -580,32 +581,35 @@ def test_deepseekv3_ws_tile_mn_mk():
         for linear_down in linear_down_list
     ]
 
-    output, off_chip_traffic_reshape, on_chip_requirement_reshape = (
-        call_ws_tile_mn_mk_gemm_reshape(
-            model_config=model_config,
-            batch=B,
-            gate_compute_bw=GATE_COMPUTE_BW,
-            up_compute_bw=UP_COMPUTE_BW,
-            act_fn_compute_bw=ACT_FN_COMPUTE_BW,
-            mult_compute_bw=MULT_COMPUTE_BW,
-            down_compute_bw=DOWN_COMPUTE_BW,
-            weight_scale_compute_bw=WEIGHT_SCALE_COMPUTE_BW,
-            accum_compute_bw=ACCUM_COMPUTE_BW,
-            input_tensor=input_tensor,
-            expert_multihot=expert_multihot,
-            expert_onehot=expert_onehot,
-            expert_weights=expert_weights,
-            w_gate_list=w_gate_list,
-            w_up_list=w_up_list,
-            w_down_list=w_down_list,
-            tile_F=tile_F,
-            tile_N=tile_N,
-            simulate_rust=False,
-            logging="expert_par_gemm_reshape",
-        )
+    output: OffChipStore
+    off_chip_traffic: sympy.Expr
+    on_chip_requirement: sympy.Expr
+
+    output, off_chip_traffic, on_chip_requirement = call_ws_tile_mn_mk_gemm_reshape(
+        model_config=model_config,
+        batch=B,
+        gate_compute_bw=GATE_COMPUTE_BW,
+        up_compute_bw=UP_COMPUTE_BW,
+        act_fn_compute_bw=ACT_FN_COMPUTE_BW,
+        mult_compute_bw=MULT_COMPUTE_BW,
+        down_compute_bw=DOWN_COMPUTE_BW,
+        weight_scale_compute_bw=WEIGHT_SCALE_COMPUTE_BW,
+        accum_compute_bw=ACCUM_COMPUTE_BW,
+        input_tensor=input_tensor,
+        expert_multihot=expert_multihot,
+        expert_onehot=expert_onehot,
+        expert_weights=expert_weights,
+        w_gate_list=w_gate_list,
+        w_up_list=w_up_list,
+        w_down_list=w_down_list,
+        tile_F=tile_F,
+        tile_N=tile_N,
+        simulate_rust=True,
+        logging="expert_par_gemm_reshape",
     )
-    print(f"Total off-chip traffic: {off_chip_traffic_reshape}")
-    print(f"Total on-chip requirement: {on_chip_requirement_reshape}")
+
+    print(f"Total off-chip traffic: {off_chip_traffic}")
+    print(f"Total on-chip requirement: {on_chip_requirement}")
 
     # Gold calculation
     # final_gold = moe_gold_calc(
@@ -617,5 +621,4 @@ def test_deepseekv3_ws_tile_mn_mk():
     #     linear_down_list,
     # )
 
-    # output: OffChipStore
     # check_gold_tensor(output.store_file_name, final_gold)

@@ -464,8 +464,9 @@ def ws_tile_mn_mk_gemv_reassemble(
     w_up_list: list[torch.Tensor],
     w_down_list: list[torch.Tensor],
     tile_F: int,
-    logging: Optional[str],
-):
+    simulate_rust: bool,
+    logging: Optional[str] = None,
+) -> tuple[StepOps, sympy.Expr, sympy.Expr]:
 
     F = model_config.moe_inter_dim
     D = model_config.dim
@@ -537,24 +538,44 @@ def ws_tile_mn_mk_gemv_reassemble(
     OUTPUT_FILENAME = "moe_weight_stationary_gemv_reassemble"
     save_graph_format(step_graph, OUTPUT_FILENAME, ["png"])
 
-    if logging is None:
-        simulate(
-            step_graph,
-            False,  # logging
-            HBMConfig(64, 8, 2, 2, 1, 14),
-            "/home/ginasohn/step_tl/graph.pb",
-        )
-    else:
-        assert isinstance(logging, str), "Logging must be a string path"
-        simulate(
-            step_graph,
-            True,  # logging
-            HBMConfig(64, 8, 2, 2, 1, 14),
-            "/home/ginasohn/step_tl/graph.pb",
-            logging,
-        )
+    total_off_chip_traffic = sympy.Integer(0)
+    total_on_chip_requirement = sympy.Integer(0)
 
-    return output_reassemble
+    for node_tuple in step_graph.nodes(data=True):
+        node, data = node_tuple
+        if isinstance(node, StepOps):
+            total_off_chip_traffic = sympy.Add(
+                total_off_chip_traffic, node.off_chip_traffic()
+            )
+            total_on_chip_requirement = sympy.Add(
+                total_on_chip_requirement, node.on_chip_requirement()
+            )
+        else:
+            raise ValueError(f"Node {node} in the graph is not a StepOps")
+
+    if simulate_rust:
+        if logging is None:
+            simulate(
+                step_graph,
+                False,  # logging
+                HBMConfig(64, 8, 2, 2, 1, 14),
+                "/home/ginasohn/step_tl/graph.pb",
+            )
+        else:
+            assert isinstance(logging, str), "Logging must be a string path"
+            simulate(
+                step_graph,
+                True,  # logging
+                HBMConfig(64, 8, 2, 2, 1, 14),
+                "/home/ginasohn/step_tl/graph.pb",
+                logging,
+            )
+
+    return (
+        output_reassemble,
+        sympy.simplify(total_off_chip_traffic),
+        sympy.simplify(total_on_chip_requirement),
+    )
 
 
 @dataclass
@@ -649,40 +670,14 @@ def test_deepseekv3_ws_tile_mn_mk():
         for linear_down in linear_down_list
     ]
 
+    output: OffChipStore
+    off_chip_traffic: sympy.Expr
+    on_chip_requirement: sympy.Expr
+
     mode = "gemv_revet"
     # mode = "gemv_reassemble"
-    # mode = "gemm"
-    if mode == "gemm":
-        pass
-    elif mode == "gemv_revet":
-        output_revet, off_chip_traffic_revet, on_chip_requirement_revet = (
-            ws_tile_mn_mk_gemv_revet(
-                model_config=model_config,
-                batch=B,
-                gate_compute_bw=GATE_COMPUTE_BW,
-                up_compute_bw=UP_COMPUTE_BW,
-                act_fn_compute_bw=ACT_FN_COMPUTE_BW,
-                mult_compute_bw=MULT_COMPUTE_BW,
-                down_compute_bw=DOWN_COMPUTE_BW,
-                weight_scale_compute_bw=WEIGHT_SCALE_COMPUTE_BW,
-                accum_compute_bw=ACCUM_COMPUTE_BW,
-                input_tensor=input_tensor,
-                expert_multihot=expert_multihot,
-                expert_onehot=expert_onehot,
-                expert_weights=expert_weights,
-                w_gate_list=w_gate_list,
-                w_up_list=w_up_list,
-                w_down_list=w_down_list,
-                tile_F=16,
-                simulate_rust=False,
-                logging="ws_gemv_revet",  # Set to a string path if logging is needed
-            )
-        )
-        print(f"Total off-chip traffic: {off_chip_traffic_revet}")
-        print(f"Total on-chip requirement: {on_chip_requirement_revet}")
-
-    elif mode == "gemv_reassemble":
-        output_reassemble: OffChipStore = ws_tile_mn_mk_gemv_reassemble(
+    if mode == "gemv_revet":
+        output, off_chip_traffic, on_chip_requirement = ws_tile_mn_mk_gemv_revet(
             model_config=model_config,
             batch=B,
             gate_compute_bw=GATE_COMPUTE_BW,
@@ -700,8 +695,34 @@ def test_deepseekv3_ws_tile_mn_mk():
             w_up_list=w_up_list,
             w_down_list=w_down_list,
             tile_F=16,
-            logging="ws_gemv_reassemble",  # Set to a string path if logging is needed
+            simulate_rust=False,
+            # logging="ws_gemv_revet",  # Set to a string path if logging is needed
         )
+    elif mode == "gemv_reassemble":
+        output, off_chip_traffic, on_chip_requirement = ws_tile_mn_mk_gemv_reassemble(
+            model_config=model_config,
+            batch=B,
+            gate_compute_bw=GATE_COMPUTE_BW,
+            up_compute_bw=UP_COMPUTE_BW,
+            act_fn_compute_bw=ACT_FN_COMPUTE_BW,
+            mult_compute_bw=MULT_COMPUTE_BW,
+            down_compute_bw=DOWN_COMPUTE_BW,
+            weight_scale_compute_bw=WEIGHT_SCALE_COMPUTE_BW,
+            accum_compute_bw=ACCUM_COMPUTE_BW,
+            input_tensor=input_tensor,
+            expert_multihot=expert_multihot,
+            expert_onehot=expert_onehot,
+            expert_weights=expert_weights,
+            w_gate_list=w_gate_list,
+            w_up_list=w_up_list,
+            w_down_list=w_down_list,
+            tile_F=16,
+            simulate_rust=True,
+            # logging="ws_gemv_reassemble",  # Set to a string path if logging is needed
+        )
+
+    print(f"Total off-chip traffic: {off_chip_traffic}")
+    print(f"Total on-chip requirement: {on_chip_requirement}")
 
     # Gold calculation
     # final_gold = moe_gold_calc(
@@ -713,7 +734,4 @@ def test_deepseekv3_ws_tile_mn_mk():
     #     linear_down_list,
     # )
 
-    # if mode == "gemv_revet":
-    #     check_gold_tensor(output_revet.store_file_name, final_gold)
-    # elif mode == "gemv_reassemble":
-    #     check_gold_tensor(output_reassemble.store_file_name, final_gold)
+    # check_gold_tensor(output.store_file_name, final_gold)
