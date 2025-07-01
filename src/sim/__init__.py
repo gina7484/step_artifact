@@ -2,7 +2,7 @@ from dataclasses import dataclass
 from typing import List, Optional, Tuple
 from step_py.ops import *
 from step_py.utility_ops import *
-from step_py.functions import accum_fn, map_fn, init_fn
+from step_py.functions import accum_fn, map_fn, init_fn, map_accum_fn
 from proto import datatype_pb2, func_pb2, graph_pb2, ops_pb2
 from step_py.datatype import *
 import numpy as np
@@ -19,20 +19,26 @@ class HBMConfig:
     per_channel_start_up_time: int
 
 
+@dataclass
+class SimConfig:
+    channel_depth: Optional[int]
+
+
 def simulate(
     graph: MultiDiGraph,
     logging: bool,
     hbm_config: HBMConfig,
+    sim_config: SimConfig,
     protobuf_file: str,
     db_name: Optional[str] = None,
 ):
 
     serialize(graph, protobuf_file)
 
-    # a = step_perf.run_graph(  # pylint: disable=no-member
-    #     protobuf_file, logging, hbm_config, db_name
-    # )
-    # print(a)
+    a = step_perf.run_graph(  # pylint: disable=no-member
+        protobuf_file, logging, hbm_config, sim_config, db_name
+    )
+    print(a)
 
 
 # pylint: disable=no-member
@@ -61,15 +67,28 @@ def to_pb_elem_to_elem_func(
     return func_pb
 
 
+# pylint: disable=no-member
+def to_pb_map_accum_func(
+    op_fn: map_accum_fn.MapAccumFn,
+) -> func_pb2.MapAccumFunc:  # pylint: disable=no-member
+    func_pb = func_pb2.MapAccumFunc()  # pylint: disable=no-member
+    if isinstance(op_fn, map_accum_fn.Matmul):
+        map_fn_pb = func_pb2.Matmul()
+        map_fn_pb.weight_transposed = op_fn.weight_transposed
+        func_pb.matmul.CopyFrom(map_fn_pb)
+
+    else:
+        raise NotImplementedError(
+            f"Function {op_fn} is not implemented for serialization."
+        )
+    return func_pb
+
+
 def to_pb_accum_func(
     op_fn: accum_fn.AccumFn,
 ) -> func_pb2.AccumFunc:  # pylint: disable=no-member
     func_pb = func_pb2.AccumFunc()  # pylint: disable=no-member
-    if isinstance(op_fn, accum_fn.Matmul):
-        accum_fn_pb = func_pb2.Matmul()
-        accum_fn_pb.weight_transposed = op_fn.weight_transposed
-        func_pb.matmul.CopyFrom(accum_fn_pb)
-    elif isinstance(op_fn, accum_fn.Mul):
+    if isinstance(op_fn, accum_fn.Mul):
         accum_fn_pb = func_pb2.Mul()
         func_pb.mul.CopyFrom(accum_fn_pb)
     elif isinstance(op_fn, accum_fn.Add):
@@ -369,7 +388,7 @@ def serialize(graph: MultiDiGraph, protobuf_file: str):
             else:
                 binarymapaccum_pb.input_id2 = op.in2.instance_id
 
-            binarymapaccum_pb.func.CopyFrom(to_pb_accum_func(op.fn))
+            binarymapaccum_pb.func.CopyFrom(to_pb_map_accum_func(op.fn))
             binarymapaccum_pb.init_func.CopyFrom(to_pb_init_func(op.init_fn))
             binarymapaccum_pb.tile_row = op.init_fn.apply().shape[0]
             binarymapaccum_pb.tile_col = op.init_fn.apply().shape[1]

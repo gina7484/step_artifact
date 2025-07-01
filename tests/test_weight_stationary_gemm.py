@@ -5,8 +5,8 @@ from step_py.kernels.linear import LinearTileConfig
 from step_py.utility_ops import *
 from step_py.ops import *
 import numpy as np
-from sim import simulate, HBMConfig
-from step_py.functions import map_fn, init_fn, accum_fn
+from sim import SimConfig, simulate, HBMConfig
+from step_py.functions import map_accum_fn, map_fn, init_fn, accum_fn
 from utils.gold_checking import check_gold_tensor
 from utils.draw_graph import save_graph_format
 from rewrite.broadcast import infer_broadcast
@@ -298,7 +298,7 @@ def ws_tile_mn_mk_gemm_reshape(
             step_graph,
             feature,
             weight,
-            accum_fn.Matmul(weight_transposed=False),
+            map_accum_fn.Matmul(weight_transposed=False),
             init_fn.Zero(shape=(tile_N, D), dtype=Float32()),
             1,
             False,
@@ -306,8 +306,6 @@ def ws_tile_mn_mk_gemm_reshape(
         )
         for feature, weight in zip(projected_feature_streams, ready_down_loads)
     ]
-    print(f"lhs tile shape: {projected_feature_streams[0].stream.stream_dtype.shape}")
-    print(f"rhs tile shape: {ready_down_loads[0].stream.stream_dtype.shape}")
 
     # - input stream shape:  [(Dyn + tile_N -1) // tile_N] (tile: [tile_N, D])
     # - output stream shape: [Dyn_retile]                  (tile: [1, D])
@@ -360,12 +358,34 @@ def ws_tile_mn_mk_gemm_reshape(
         for i in range(model_config.n_routed_experts)
     ]
 
+    # idx_to_print = 4
+    # # Expert counts: tensor([21, 21, 11, 16, 16, 12, 12, 19])
+    # for i in range(model_config.n_routed_experts):
+    #     if i == idx_to_print:
+    #         consume = ConsumerContext(
+    #             graph=step_graph,
+    #             input=(expert_weight_streams, i),
+    #         )
+
+    #         printc = PrinterContext(
+    #             graph=step_graph,
+    #             input=down_feature_streams[i],
+    #         )
+    #     else:
+    #         con_i = ConsumerContext(graph=step_graph, input=(expert_weight_streams, i))
+
+    #         con_f = ConsumerContext(graph=step_graph, input=down_feature_streams[i])
+
     # ------------ Stage 15: Reassemble the weighted features ------------
     # Reassemble
+    feature_select_gen_reassemble = SelectGen(
+        is_multihot=True, tensor=expert_multihot, n=model_config.n_routed_experts
+    )
+
     reassembled_stream = FlatReassemble(
         step_graph,
         weighted_feature_streams,  # [Dyn] # type: ignore (Cannot infer type of weighted_feature_streams properly)
-        feature_select_gen,  # [1, N]
+        feature_select_gen_reassemble,  # [1, N]
         reassemble_rank=0,
         switch_cycles=[1 for _ in range(model_config.n_routed_experts)],
         write_back_mu=False,
@@ -381,15 +401,19 @@ def ws_tile_mn_mk_gemm_reshape(
         1,
         False,
         accum_compute_bw,
-    )  # [1, N]
+    )  # [1, N] (tile: [1, D])
 
     # ------------ Stage 17: Store the output ------------
     output = OffChipStore(
         step_graph,
-        accumed_stream,
+        Promote(
+            graph=step_graph,
+            input=accumed_stream,
+            promote_rank=0,
+        ),
         par_dispatch=4,
         store_file_name="output",
-    )  # [1, N]
+    )  # [1, N, 1] (tile: [1, D])
 
     return output
 
@@ -414,7 +438,7 @@ def call_ws_tile_mn_mk_gemm_reshape(
     tile_N: int,
     tile_F: int,
     simulate_rust: bool,
-    logging: Optional[str],
+    logging: Optional[str] = None,
 ) -> tuple[StepOps, sympy.Expr, sympy.Expr]:
     step_graph = MultiDiGraph()
 
@@ -463,11 +487,15 @@ def call_ws_tile_mn_mk_gemm_reshape(
             raise ValueError(f"Node {node} in the graph is not a StepOps")
 
     if simulate_rust:
+        hbm_config = HBMConfig(64, 8, 2, 2, 1, 14)
+        sim_config = SimConfig(channel_depth=1)
+
         if logging is None:
             simulate(
                 step_graph,
                 False,  # logging
-                HBMConfig(64, 8, 2, 2, 1, 14),
+                hbm_config,
+                sim_config,
                 "/home/ginasohn/step_tl/graph.pb",
             )
         else:
@@ -475,7 +503,8 @@ def call_ws_tile_mn_mk_gemm_reshape(
             simulate(
                 step_graph,
                 True,  # logging
-                HBMConfig(64, 8, 2, 2, 1, 14),
+                hbm_config,
+                sim_config,
                 "/home/ginasohn/step_tl/graph.pb",
                 logging,
             )
@@ -540,11 +569,18 @@ def test_deepseekv3_ws_tile_mn_mk():
     # Set the random seed
     torch.manual_seed(42)
 
+    # [B, n_activated_experts]
     expert_indices = torch.topk(
         torch.randn(B, model_config.n_routed_experts),
         model_config.n_activated_experts,
         dim=-1,
     )[1]
+
+    # Get bincount across all batches [n_routed_experts]
+    expert_counts = torch.bincount(
+        expert_indices.flatten(), minlength=model_config.n_routed_experts
+    )
+    print(f"Expert counts: {expert_counts}")
 
     # [B, n_routed_experts]
     expert_multihot = topk_to_multihot(expert_indices, model_config.n_routed_experts)
@@ -609,20 +645,20 @@ def test_deepseekv3_ws_tile_mn_mk():
         tile_F=tile_F,
         tile_N=tile_N,
         simulate_rust=True,
-        logging="expert_par_gemm_reshape",
+        # logging="expert_par_gemm_reshape",
     )
 
     print(f"Total off-chip traffic: {off_chip_traffic}")
     print(f"Total on-chip requirement: {on_chip_requirement}")
 
     # Gold calculation
-    # final_gold = moe_gold_calc(
-    #     input_tensor,
-    #     expert_indices,
-    #     expert_weights,
-    #     linear_gate_list,
-    #     linear_up_list,
-    #     linear_down_list,
-    # )
+    final_gold = moe_gold_calc(
+        input_tensor,
+        expert_indices,
+        expert_weights,
+        linear_gate_list,
+        linear_up_list,
+        linear_down_list,
+    )
 
-    # check_gold_tensor(output.store_file_name, final_gold)
+    check_gold_tensor(output.store_file_name, final_gold)

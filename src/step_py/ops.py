@@ -5,6 +5,7 @@ from typing import List, Optional, Tuple, Union
 from step_py.dyndim import DynDim
 from step_py.functions.accum_fn import AccumFn
 from step_py.functions.init_fn import InitFn
+from step_py.functions.map_accum_fn import MapAccumFn
 from step_py.functions.map_fn import MapFn
 from step_py.datatype import Buffer, Stream, Tile, Select, Float16, Float32
 from networkx import MultiDiGraph
@@ -580,7 +581,7 @@ class BinaryMap(StepOps):
 class BinaryMapAccum(StepOps):
     in1: Union[StepOps, Tuple[StepOps, int]]
     in2: Union[StepOps, Tuple[StepOps, int]]
-    fn: AccumFn
+    fn: MapAccumFn
     init_fn: InitFn
     rank: int
     write_back_mu: bool  # whether the consumer is a bufferize or not
@@ -593,7 +594,7 @@ class BinaryMapAccum(StepOps):
         graph: MultiDiGraph,
         in1: Union[StepOps, Tuple[StepOps, int]],
         in2: Union[StepOps, Tuple[StepOps, int]],
-        fn: AccumFn,
+        fn: MapAccumFn,
         init_fn: InitFn,
         rank: int,
         write_back_mu: bool,
