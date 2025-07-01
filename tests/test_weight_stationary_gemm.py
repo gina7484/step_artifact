@@ -114,7 +114,8 @@ def ws_tile_mn_mk_gemm_reshape(
                 (unchunked_expert_feature_streams, i),
                 tile_N,
                 0,
-                init_fn.Zero(shape=(1, D), dtype=Float32()),
+                write_back_mu=False,
+                pad_fn=init_fn.Zero(shape=(1, D), dtype=Float32()),
             ),
             Tile(tile_dtype=Float32(), shape=(tile_N, D)),
             accum_fn.RetileRow(),
@@ -298,13 +299,15 @@ def ws_tile_mn_mk_gemm_reshape(
             feature,
             weight,
             accum_fn.Matmul(weight_transposed=False),
-            init_fn.Zero(shape=(1, D), dtype=Float32()),
+            init_fn.Zero(shape=(tile_N, D), dtype=Float32()),
             1,
             False,
             down_compute_bw,
         )
         for feature, weight in zip(projected_feature_streams, ready_down_loads)
     ]
+    print(f"lhs tile shape: {projected_feature_streams[0].stream.stream_dtype.shape}")
+    print(f"rhs tile shape: {ready_down_loads[0].stream.stream_dtype.shape}")
 
     # - input stream shape:  [(Dyn + tile_N -1) // tile_N] (tile: [tile_N, D])
     # - output stream shape: [Dyn_retile]                  (tile: [1, D])
@@ -414,6 +417,7 @@ def call_ws_tile_mn_mk_gemm_reshape(
     logging: Optional[str],
 ) -> tuple[StepOps, sympy.Expr, sympy.Expr]:
     step_graph = MultiDiGraph()
+
     output: OffChipStore = ws_tile_mn_mk_gemm_reshape(
         step_graph=step_graph,
         model_config=model_config,
@@ -436,12 +440,12 @@ def call_ws_tile_mn_mk_gemm_reshape(
         tile_F=tile_F,
     )
 
-    # print(f"Output untiled: {output.get_untiled_shape()}")
+    print(f"Output untiled: {output.get_untiled_shape()}")
 
-    # step_graph = infer_broadcast(step_graph)
+    step_graph = infer_broadcast(step_graph)
 
-    # OUTPUT_FILENAME = "moe_expert_par_gemm_reshape"
-    # save_graph_format(step_graph, OUTPUT_FILENAME, ["png"])
+    OUTPUT_FILENAME = "moe_expert_par_gemm_reshape"
+    save_graph_format(step_graph, OUTPUT_FILENAME, ["png"])
 
     total_off_chip_traffic = sympy.Integer(0)
     total_on_chip_requirement = sympy.Integer(0)

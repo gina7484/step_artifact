@@ -554,6 +554,7 @@ def serialize(graph: MultiDiGraph, protobuf_file: str):
             reshape_pb.split_dim = op.reshape_rank
             reshape_pb.chunk_size = op.chunk_size
             reshape_pb.dtype.CopyFrom(to_pb_datatype(op.stream.stream_dtype))
+            reshape_pb.write_back_mu = op.write_back_mu
 
             if op.pad_fn is not None:
                 reshape_pb.pad_func.CopyFrom(to_pb_init_func(op.pad_fn))

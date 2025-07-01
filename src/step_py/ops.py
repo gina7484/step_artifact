@@ -1777,6 +1777,7 @@ class Reshape(StepOps):
     chunk_size: int
     reshape_rank: int
     pad_fn: Optional[InitFn]
+    write_back_mu: bool
     _stream: Stream
 
     def __init__(
@@ -1785,6 +1786,7 @@ class Reshape(StepOps):
         input: Union[StepOps, Tuple[StepOps, int]],
         chunk_size: int,
         reshape_rank: int,
+        write_back_mu: bool,
         pad_fn: Optional[InitFn] = None,
     ):
         super().__init__()
@@ -1792,6 +1794,7 @@ class Reshape(StepOps):
         self.chunk_size = chunk_size
         self.reshape_rank = reshape_rank
         self.pad_fn = pad_fn
+        self.write_back_mu = write_back_mu
 
         in_stream: Stream = get_stream(input)
         assert (
