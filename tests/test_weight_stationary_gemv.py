@@ -4,8 +4,8 @@ from step_py.kernels.linear import LinearTileConfig
 from step_py.utility_ops import *
 from step_py.ops import *
 import numpy as np
-from sim import simulate, HBMConfig
-from step_py.functions import accum_fn, map_fn, init_fn
+from sim import SimConfig, simulate, HBMConfig
+from step_py.functions import accum_fn, map_accum_fn, map_fn, init_fn
 from utils.gold_checking import check_gold_tensor
 from utils.draw_graph import save_graph_format
 from rewrite.broadcast import infer_broadcast
@@ -271,7 +271,7 @@ def ws_tile_mn_mk_gemv(
             step_graph,
             feature,
             weight,
-            accum_fn.Matmul(weight_transposed=False),
+            map_accum_fn.Matmul(weight_transposed=False),
             init_fn.Zero(shape=(1, D), dtype=Float32()),
             1,
             False,
@@ -311,7 +311,7 @@ def ws_tile_mn_mk_gemv(
         for i in range(model_config.n_routed_experts)
     ]
 
-    return (weighted_feature_streams, feature_select_gen)
+    return weighted_feature_streams
 
 
 def ws_tile_mn_mk_gemv_revet(
@@ -340,7 +340,7 @@ def ws_tile_mn_mk_gemv_revet(
     D = model_config.dim
 
     step_graph: MultiDiGraph = MultiDiGraph()
-    weighted_feature_streams, feature_select_gen = ws_tile_mn_mk_gemv(
+    weighted_feature_streams = ws_tile_mn_mk_gemv(
         step_graph,
         model_config,
         batch,
@@ -364,10 +364,14 @@ def ws_tile_mn_mk_gemv_revet(
     # - control stream: [1, B]
     # - reassemble_rank: 0
     # - output stream: [1, B, n_activated_experts] (tile: [1, D])
+    feature_select_gen_reassemble = SelectGen(
+        is_multihot=True, tensor=expert_multihot, n=model_config.n_routed_experts
+    )
+
     reassembled_stream = FlatReassemble(
         step_graph,
         weighted_feature_streams,  # [Dyn]  # type: ignore (type checker can't detect that BinaryMap is a child of StepOps)
-        feature_select_gen,  # [1, B]
+        feature_select_gen_reassemble,  # [1, B]
         reassemble_rank=0,
         switch_cycles=[1 for _ in range(model_config.n_routed_experts)],
         write_back_mu=True,
@@ -422,11 +426,14 @@ def ws_tile_mn_mk_gemv_revet(
             raise ValueError(f"Node {node} in the graph is not a StepOps")
 
     if simulate_rust:
+        hbm_config = HBMConfig(64, 8, 2, 2, 1, 14)
+        sim_config = SimConfig(channel_depth=1)
         if logging is None:
             simulate(
                 step_graph,
                 False,  # logging
-                HBMConfig(64, 8, 2, 2, 1, 14),
+                hbm_config,
+                sim_config,
                 "/home/ginasohn/step_tl/graph.pb",
             )
         else:
@@ -434,7 +441,8 @@ def ws_tile_mn_mk_gemv_revet(
             simulate(
                 step_graph,
                 True,  # logging
-                HBMConfig(64, 8, 2, 2, 1, 14),
+                hbm_config,
+                sim_config,
                 "/home/ginasohn/step_tl/graph.pb",
                 logging,
             )
@@ -472,7 +480,7 @@ def ws_tile_mn_mk_gemv_reassemble(
     D = model_config.dim
 
     step_graph: MultiDiGraph = MultiDiGraph()
-    weighted_feature_streams, feature_select_gen = ws_tile_mn_mk_gemv(
+    weighted_feature_streams = ws_tile_mn_mk_gemv(
         step_graph,
         model_config,
         batch,
@@ -496,10 +504,13 @@ def ws_tile_mn_mk_gemv_reassemble(
     # - control stream: [1, B]
     # - reassemble_rank: 0
     # - output stream: [1, B, n_activated_experts] (tile: [1, D])
+    feature_select_gen_reassemble = SelectGen(
+        is_multihot=True, tensor=expert_multihot, n=model_config.n_routed_experts
+    )
     reassembled_stream = FlatReassemble(
         step_graph,
         weighted_feature_streams,  # [Dyn]  # type: ignore
-        feature_select_gen,  # [1, B]
+        feature_select_gen_reassemble,  # [1, B]
         reassemble_rank=0,
         switch_cycles=[1 for _ in range(model_config.n_routed_experts)],
         write_back_mu=False,
@@ -554,11 +565,14 @@ def ws_tile_mn_mk_gemv_reassemble(
             raise ValueError(f"Node {node} in the graph is not a StepOps")
 
     if simulate_rust:
+        hbm_config = HBMConfig(64, 8, 2, 2, 1, 14)
+        sim_config = SimConfig(channel_depth=1)
         if logging is None:
             simulate(
                 step_graph,
                 False,  # logging
-                HBMConfig(64, 8, 2, 2, 1, 14),
+                hbm_config,
+                sim_config,
                 "/home/ginasohn/step_tl/graph.pb",
             )
         else:
@@ -566,7 +580,8 @@ def ws_tile_mn_mk_gemv_reassemble(
             simulate(
                 step_graph,
                 True,  # logging
-                HBMConfig(64, 8, 2, 2, 1, 14),
+                hbm_config,
+                sim_config,
                 "/home/ginasohn/step_tl/graph.pb",
                 logging,
             )
@@ -631,6 +646,12 @@ def test_deepseekv3_ws_tile_mn_mk():
         dim=-1,
     )[1]
 
+    # Get bincount across all batches [n_routed_experts]
+    expert_counts = torch.bincount(
+        expert_indices.flatten(), minlength=model_config.n_routed_experts
+    )
+    print(f"Expert counts: {expert_counts}")
+
     # [B, n_routed_experts]
     expert_multihot = topk_to_multihot(expert_indices, model_config.n_routed_experts)
 
@@ -674,8 +695,8 @@ def test_deepseekv3_ws_tile_mn_mk():
     off_chip_traffic: sympy.Expr
     on_chip_requirement: sympy.Expr
 
-    mode = "gemv_revet"
-    # mode = "gemv_reassemble"
+    # mode = "gemv_revet"
+    mode = "gemv_reassemble"
     if mode == "gemv_revet":
         output, off_chip_traffic, on_chip_requirement = ws_tile_mn_mk_gemv_revet(  # type: ignore (Cannot infer type of output properly)
             model_config=model_config,
@@ -695,7 +716,7 @@ def test_deepseekv3_ws_tile_mn_mk():
             w_up_list=w_up_list,
             w_down_list=w_down_list,
             tile_F=16,
-            simulate_rust=False,
+            simulate_rust=True,
             # logging="ws_gemv_revet",  # Set to a string path if logging is needed
         )
     elif mode == "gemv_reassemble":
@@ -725,13 +746,13 @@ def test_deepseekv3_ws_tile_mn_mk():
     print(f"Total on-chip requirement: {on_chip_requirement}")
 
     # Gold calculation
-    # final_gold = moe_gold_calc(
-    #     input_tensor,
-    #     expert_indices,
-    #     expert_weights,
-    #     linear_gate_list,
-    #     linear_up_list,
-    #     linear_down_list,
-    # )
+    final_gold = moe_gold_calc(
+        input_tensor,
+        expert_indices,
+        expert_weights,
+        linear_gate_list,
+        linear_up_list,
+        linear_down_list,
+    )
 
-    # check_gold_tensor(output.store_file_name, final_gold)
+    check_gold_tensor(output.store_file_name, final_gold)
