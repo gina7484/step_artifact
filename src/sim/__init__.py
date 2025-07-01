@@ -2,7 +2,7 @@ from dataclasses import dataclass
 from typing import List, Optional, Tuple
 from step_py.ops import *
 from step_py.utility_ops import *
-from step_py.functions import map_fn, init_fn
+from step_py.functions import accum_fn, map_fn, init_fn
 from proto import datatype_pb2, func_pb2, graph_pb2, ops_pb2
 from step_py.datatype import *
 import numpy as np
@@ -29,10 +29,10 @@ def simulate(
 
     serialize(graph, protobuf_file)
 
-    a = step_perf.run_graph(  # pylint: disable=no-member
-        protobuf_file, logging, hbm_config, db_name
-    )
-    print(a)
+    # a = step_perf.run_graph(  # pylint: disable=no-member
+    #     protobuf_file, logging, hbm_config, db_name
+    # )
+    # print(a)
 
 
 # pylint: disable=no-member
@@ -53,6 +53,34 @@ def to_pb_elem_to_elem_func(
     elif isinstance(op_fn, map_fn.Add):
         map_fn_pb = func_pb2.Add()
         func_pb.add.CopyFrom(map_fn_pb)
+
+    else:
+        raise NotImplementedError(
+            f"Function {op_fn} is not implemented for serialization."
+        )
+    return func_pb
+
+
+def to_pb_accum_func(
+    op_fn: accum_fn.AccumFn,
+) -> func_pb2.AccumFunc:  # pylint: disable=no-member
+    func_pb = func_pb2.AccumFunc()  # pylint: disable=no-member
+    if isinstance(op_fn, accum_fn.Matmul):
+        accum_fn_pb = func_pb2.Matmul()
+        accum_fn_pb.weight_transposed = op_fn.weight_transposed
+        func_pb.matmul.CopyFrom(accum_fn_pb)
+    elif isinstance(op_fn, accum_fn.Mul):
+        accum_fn_pb = func_pb2.Mul()
+        func_pb.mul.CopyFrom(accum_fn_pb)
+    elif isinstance(op_fn, accum_fn.Add):
+        accum_fn_pb = func_pb2.Add()
+        func_pb.add.CopyFrom(accum_fn_pb)
+    elif isinstance(op_fn, accum_fn.RetileRow):
+        accum_fn_pb = func_pb2.RetileRow()
+        func_pb.retile_row.CopyFrom(accum_fn_pb)
+    elif isinstance(op_fn, accum_fn.RetileCol):
+        accum_fn_pb = func_pb2.RetileCol()
+        func_pb.retile_col.CopyFrom(accum_fn_pb)
 
     else:
         raise NotImplementedError(
@@ -341,7 +369,7 @@ def serialize(graph: MultiDiGraph, protobuf_file: str):
             else:
                 binarymapaccum_pb.input_id2 = op.in2.instance_id
 
-            binarymapaccum_pb.func.CopyFrom(to_pb_elem_to_elem_func(op.fn))
+            binarymapaccum_pb.func.CopyFrom(to_pb_accum_func(op.fn))
             binarymapaccum_pb.init_func.CopyFrom(to_pb_init_func(op.init_fn))
             binarymapaccum_pb.tile_row = op.init_fn.apply().shape[0]
             binarymapaccum_pb.tile_col = op.init_fn.apply().shape[1]
@@ -366,7 +394,7 @@ def serialize(graph: MultiDiGraph, protobuf_file: str):
                 accum_pb.input_id = op.input.instance_id
                 accum_pb.dtype_a.CopyFrom(to_pb_datatype(op.input.stream.stream_dtype))
 
-            accum_pb.func.CopyFrom(to_pb_elem_to_elem_func(op.fn))
+            accum_pb.func.CopyFrom(to_pb_accum_func(op.fn))
             accum_pb.init_func.CopyFrom(to_pb_init_func(op.init_fn))
 
             accum_row, accum_col = op.init_fn.apply().shape
@@ -513,6 +541,42 @@ def serialize(graph: MultiDiGraph, protobuf_file: str):
             flatten_pb.dtype.CopyFrom(to_pb_datatype(op.stream.stream_dtype))
 
             operator.flatten.CopyFrom(flatten_pb)
+        elif isinstance(op, Reshape):
+            reshape_pb = ops_pb2.Reshape()
+
+            if isinstance(op.input, Tuple):
+                input_node, idx = op.input
+                reshape_pb.stream_idx = idx
+                reshape_pb.input_id = input_node.instance_id
+            else:
+                reshape_pb.input_id = op.input.instance_id
+
+            reshape_pb.split_dim = op.reshape_rank
+            reshape_pb.chunk_size = op.chunk_size
+            reshape_pb.dtype.CopyFrom(to_pb_datatype(op.stream.stream_dtype))
+
+            if op.pad_fn is not None:
+                reshape_pb.pad_func.CopyFrom(to_pb_init_func(op.pad_fn))
+                pad_row, pad_col = op.pad_fn.apply().shape
+                reshape_pb.tile_row = pad_row
+                reshape_pb.tile_col = pad_col
+
+            operator.reshape.CopyFrom(reshape_pb)
+        elif isinstance(op, RetileStreamify):
+            retilestreamify_pb = ops_pb2.RetileStreamify()
+
+            if isinstance(op.input, Tuple):
+                input_node, idx = op.input
+                retilestreamify_pb.stream_idx = idx
+                retilestreamify_pb.input_id = input_node.instance_id
+            else:
+                retilestreamify_pb.input_id = op.input.instance_id
+
+            retilestreamify_pb.split_row = op.split_row
+            retilestreamify_pb.filter_mask = op.filter_mask
+            retilestreamify_pb.dtype.CopyFrom(to_pb_datatype(op.stream.stream_dtype))
+
+            operator.retile_streamify.CopyFrom(retilestreamify_pb)
         elif isinstance(op, SelectGen):
             selectgen_pb = ops_pb2.SelectGen()
 

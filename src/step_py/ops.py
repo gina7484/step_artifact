@@ -1,8 +1,9 @@
 from abc import ABC, abstractmethod
 from sympy import ceiling
 import torch
-from typing import List, Tuple, Union
+from typing import List, Optional, Tuple, Union
 from step_py.dyndim import DynDim
+from step_py.functions.accum_fn import AccumFn
 from step_py.functions.init_fn import InitFn
 from step_py.functions.map_fn import MapFn
 from step_py.datatype import Buffer, Stream, Tile, Select, Float16, Float32
@@ -579,7 +580,7 @@ class BinaryMap(StepOps):
 class BinaryMapAccum(StepOps):
     in1: Union[StepOps, Tuple[StepOps, int]]
     in2: Union[StepOps, Tuple[StepOps, int]]
-    fn: MapFn
+    fn: AccumFn
     init_fn: InitFn
     rank: int
     write_back_mu: bool  # whether the consumer is a bufferize or not
@@ -592,7 +593,7 @@ class BinaryMapAccum(StepOps):
         graph: MultiDiGraph,
         in1: Union[StepOps, Tuple[StepOps, int]],
         in2: Union[StepOps, Tuple[StepOps, int]],
-        fn: MapFn,
+        fn: AccumFn,
         init_fn: InitFn,
         rank: int,
         write_back_mu: bool,
@@ -1577,7 +1578,7 @@ class UnaryMap(StepOps):
 
 class Accum(StepOps):
     _input: Union[StepOps, Tuple[StepOps, int]]
-    fn: MapFn
+    fn: AccumFn
     init_fn: InitFn
     accum_rank: int
     write_back_mu: bool
@@ -1589,7 +1590,7 @@ class Accum(StepOps):
         graph: MultiDiGraph,
         input: Union[StepOps, Tuple[StepOps, int]],
         output_stream_dtype: Union[Tile, Buffer, Select],
-        fn: MapFn,
+        fn: AccumFn,
         init_fn: InitFn,
         accum_rank: int,
         write_back_mu: bool,
@@ -1713,9 +1714,9 @@ class Flatten(StepOps):
         merged_dim: Union[int, DynDim] = 1
         for i in range(min_index, max_index + 1):
             if isinstance(shape[i], DynDim):
-                merged_dim = shape[i] * merged_dim
+                merged_dim = shape[i] * merged_dim  # type: ignore
             else:
-                merged_dim = merged_dim * shape[i]
+                merged_dim = merged_dim * shape[i]  # type: ignore
 
         # Build new shape
         new_shape = shape[:min_index] + (merged_dim,) + shape[max_index + 1 :]
@@ -1775,7 +1776,7 @@ class Reshape(StepOps):
     _input: Union[StepOps, Tuple[StepOps, int]]
     chunk_size: int
     reshape_rank: int
-    pad_fn: InitFn
+    pad_fn: Optional[InitFn]
     _stream: Stream
 
     def __init__(
@@ -1784,7 +1785,7 @@ class Reshape(StepOps):
         input: Union[StepOps, Tuple[StepOps, int]],
         chunk_size: int,
         reshape_rank: int,
-        pad_fn: InitFn,
+        pad_fn: Optional[InitFn] = None,
     ):
         super().__init__()
         self._input = input
@@ -1793,6 +1794,12 @@ class Reshape(StepOps):
         self.pad_fn = pad_fn
 
         in_stream: Stream = get_stream(input)
+        assert (
+            reshape_rank > 0 and in_stream.shape[reshape_rank] % chunk_size == 0
+        ) or (
+            pad_fn is not None and reshape_rank == 0
+        ), "The chunk size must be a divisor of the shape at the reshape rank if the rank being split is not the innermost"
+
         assert (
             reshape_rank >= 0 and reshape_rank <= in_stream.rank
         ), f"Reshape rank must be between 0 and {in_stream.rank}."
@@ -1894,8 +1901,8 @@ class RetileStreamify(StepOps):
             in_stream.stream_dtype, Tile
         ), "Input stream must be a Tile type."
 
+        in_stream_tile: Tile = in_stream.stream_dtype
         if split_row:
-            in_stream_tile: Tile = in_stream.stream_dtype
             if filter_mask:
                 output_stream_shape = in_stream.shape[:-1] + (
                     DynDim(f"{str(self)}_dyn"),
@@ -1915,7 +1922,6 @@ class RetileStreamify(StepOps):
                 )
 
         else:
-            in_stream_tile: Tile = in_stream.stream_dtype
             if filter_mask:
                 output_stream_shape = in_stream.shape[:-1] + (
                     DynDim(f"{str(self)}_dyn"),

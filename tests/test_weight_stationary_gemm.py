@@ -6,7 +6,7 @@ from step_py.utility_ops import *
 from step_py.ops import *
 import numpy as np
 from sim import simulate, HBMConfig
-from step_py.functions import map_fn, init_fn
+from step_py.functions import map_fn, init_fn, accum_fn
 from utils.gold_checking import check_gold_tensor
 from utils.draw_graph import save_graph_format
 from rewrite.broadcast import infer_broadcast
@@ -117,7 +117,7 @@ def ws_tile_mn_mk_gemm_reshape(
                 init_fn.Zero(shape=(1, D), dtype=Float32()),
             ),
             Tile(tile_dtype=Float32(), shape=(tile_N, D)),
-            map_fn.RetileRow(),
+            accum_fn.RetileRow(),
             init_fn.Empty(shape=(0, D), dtype=Float32()),
             1,
             False,
@@ -297,7 +297,7 @@ def ws_tile_mn_mk_gemm_reshape(
             step_graph,
             feature,
             weight,
-            map_fn.Matmul(weight_transposed=False),
+            accum_fn.Matmul(weight_transposed=False),
             init_fn.Zero(shape=(1, D), dtype=Float32()),
             1,
             False,
@@ -322,7 +322,7 @@ def ws_tile_mn_mk_gemm_reshape(
     for partitioned_stream, retiled_stream in zip(
         unchunked_expert_feature_streams.stream_list, down_feature_streams
     ):
-        dyn_i = partitioned_stream.stream_dtype.shape[0]
+        dyn_i = partitioned_stream.shape[0]
         retiled_stream.stream.shape = (dyn_i,)
 
     # ------------ Stage 13: Partition the scalar weights ------------
@@ -361,7 +361,7 @@ def ws_tile_mn_mk_gemm_reshape(
     # Reassemble
     reassembled_stream = FlatReassemble(
         step_graph,
-        weighted_feature_streams,  # [Dyn]
+        weighted_feature_streams,  # [Dyn] # type: ignore (Cannot infer type of weighted_feature_streams properly)
         feature_select_gen,  # [1, N]
         reassemble_rank=0,
         switch_cycles=[1 for _ in range(model_config.n_routed_experts)],
@@ -373,7 +373,7 @@ def ws_tile_mn_mk_gemm_reshape(
         step_graph,
         reassembled_stream,  # [1, N, Ragged]
         Tile(tile_dtype=Float32(), shape=(1, D)),
-        map_fn.Add(),
+        accum_fn.Add(),
         init_fn.Zero(shape=(1, D), dtype=Float32()),
         1,
         False,
@@ -585,7 +585,7 @@ def test_deepseekv3_ws_tile_mn_mk():
     off_chip_traffic: sympy.Expr
     on_chip_requirement: sympy.Expr
 
-    output, off_chip_traffic, on_chip_requirement = call_ws_tile_mn_mk_gemm_reshape(
+    output, off_chip_traffic, on_chip_requirement = call_ws_tile_mn_mk_gemm_reshape(  # type: ignore (Cannot infer type of output properly)
         model_config=model_config,
         batch=B,
         gate_compute_bw=GATE_COMPUTE_BW,

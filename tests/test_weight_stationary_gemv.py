@@ -5,7 +5,7 @@ from step_py.utility_ops import *
 from step_py.ops import *
 import numpy as np
 from sim import simulate, HBMConfig
-from step_py.functions import map_fn, init_fn
+from step_py.functions import accum_fn, map_fn, init_fn
 from utils.gold_checking import check_gold_tensor
 from utils.draw_graph import save_graph_format
 from rewrite.broadcast import infer_broadcast
@@ -271,7 +271,7 @@ def ws_tile_mn_mk_gemv(
             step_graph,
             feature,
             weight,
-            map_fn.Matmul(weight_transposed=False),
+            accum_fn.Matmul(weight_transposed=False),
             init_fn.Zero(shape=(1, D), dtype=Float32()),
             1,
             False,
@@ -381,7 +381,7 @@ def ws_tile_mn_mk_gemv_revet(
         step_graph,
         reassembled_stream,
         Tile(tile_dtype=Float32(), shape=(1, D)),
-        map_fn.Add(),
+        accum_fn.Add(),
         init_fn.Zero(shape=(1, D), dtype=Float32()),
         1,
         True,
@@ -513,7 +513,7 @@ def ws_tile_mn_mk_gemv_reassemble(
         step_graph,
         reassembled_stream,
         Tile(tile_dtype=Float32(), shape=(1, D)),
-        map_fn.Add(),
+        accum_fn.Add(),
         init_fn.Zero(shape=(1, D), dtype=Float32()),
         1,
         True,
@@ -677,7 +677,7 @@ def test_deepseekv3_ws_tile_mn_mk():
     mode = "gemv_revet"
     # mode = "gemv_reassemble"
     if mode == "gemv_revet":
-        output, off_chip_traffic, on_chip_requirement = ws_tile_mn_mk_gemv_revet(
+        output, off_chip_traffic, on_chip_requirement = ws_tile_mn_mk_gemv_revet(  # type: ignore (Cannot infer type of output properly)
             model_config=model_config,
             batch=B,
             gate_compute_bw=GATE_COMPUTE_BW,
@@ -699,7 +699,7 @@ def test_deepseekv3_ws_tile_mn_mk():
             # logging="ws_gemv_revet",  # Set to a string path if logging is needed
         )
     elif mode == "gemv_reassemble":
-        output, off_chip_traffic, on_chip_requirement = ws_tile_mn_mk_gemv_reassemble(
+        output, off_chip_traffic, on_chip_requirement = ws_tile_mn_mk_gemv_reassemble(  # type: ignore (Cannot infer type of output properly)
             model_config=model_config,
             batch=B,
             gate_compute_bw=GATE_COMPUTE_BW,
