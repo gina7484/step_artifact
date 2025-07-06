@@ -332,6 +332,7 @@ def ws_tile_mn_mk_gemv_revet(
     w_up_list: list[torch.Tensor],
     w_down_list: list[torch.Tensor],
     tile_F: int,
+    save_graph: bool,
     simulate_rust: bool,
     logging: Optional[str] = None,
 ) -> tuple[StepOps, sympy.Expr, sympy.Expr]:
@@ -407,8 +408,9 @@ def ws_tile_mn_mk_gemv_revet(
 
     step_graph = infer_broadcast(step_graph)
 
-    OUTPUT_FILENAME = "moe_weight_stationary_gemv_revet"
-    save_graph_format(step_graph, OUTPUT_FILENAME, ["png"])
+    if save_graph:
+        OUTPUT_FILENAME = "moe_weight_stationary_gemv_revet"
+        save_graph_format(step_graph, OUTPUT_FILENAME, ["png"])
 
     total_off_chip_traffic = sympy.Integer(0)
     total_on_chip_requirement = sympy.Integer(0)
@@ -472,6 +474,7 @@ def ws_tile_mn_mk_gemv_reassemble(
     w_up_list: list[torch.Tensor],
     w_down_list: list[torch.Tensor],
     tile_F: int,
+    save_graph: bool,
     simulate_rust: bool,
     logging: Optional[str] = None,
 ) -> tuple[StepOps, sympy.Expr, sympy.Expr]:
@@ -546,8 +549,9 @@ def ws_tile_mn_mk_gemv_reassemble(
 
     step_graph = infer_broadcast(step_graph)
 
-    OUTPUT_FILENAME = "moe_weight_stationary_gemv_reassemble"
-    save_graph_format(step_graph, OUTPUT_FILENAME, ["png"])
+    if save_graph:
+        OUTPUT_FILENAME = "moe_weight_stationary_gemv_reassemble"
+        save_graph_format(step_graph, OUTPUT_FILENAME, ["png"])
 
     total_off_chip_traffic = sympy.Integer(0)
     total_on_chip_requirement = sympy.Integer(0)
@@ -605,24 +609,36 @@ class DeepSeekV316B:
 class SmallerDeepSeekV3:
     n_routed_experts = 64
     n_activated_experts = 6
-    dim = 64
-    moe_inter_dim = 128
+    dim = 64  # 2048 // 32 = 64
+    moe_inter_dim = 352  # 1408 // 4 (Can use tile size of 32)
 
 
 @dataclass
-class SmallerMixtral:
+class SmallerMixtral:  # 32x scaled down version for each dimension
     n_routed_experts = 8
     n_activated_experts = 2
-    dim = 64
-    moe_inter_dim = 128
+    dim = 128  # 4096/32
+    moe_inter_dim = 448  # 14336/32 (Can use tile size of 64)
+
+
+@dataclass
+class Mixtral8x7b:
+    n_routed_experts = 8
+    n_activated_experts = 2
+    dim = 4096
+    moe_inter_dim = 14336
 
 
 def test_deepseekv3_ws_tile_mn_mk():
     # ------------ Model Configuration ------------
     model_config = SmallerMixtral()
+    # model_config = SmallerDeepSeekV3()
 
     # ------------ Batch Size ------------
     B = 64
+
+    # ------------ Tile Size ------------
+    TILE_F = 32
 
     # ------------ Compute Bandwidths ------------
     GATE_COMPUTE_BW = 1022
@@ -695,8 +711,8 @@ def test_deepseekv3_ws_tile_mn_mk():
     off_chip_traffic: sympy.Expr
     on_chip_requirement: sympy.Expr
 
-    # mode = "gemv_revet"
-    mode = "gemv_reassemble"
+    mode = "gemv_revet"
+    # mode = "gemv_reassemble"
     if mode == "gemv_revet":
         output, off_chip_traffic, on_chip_requirement = ws_tile_mn_mk_gemv_revet(  # type: ignore (Cannot infer type of output properly)
             model_config=model_config,
@@ -715,7 +731,8 @@ def test_deepseekv3_ws_tile_mn_mk():
             w_gate_list=w_gate_list,
             w_up_list=w_up_list,
             w_down_list=w_down_list,
-            tile_F=16,
+            tile_F=TILE_F,
+            save_graph=False,
             simulate_rust=True,
             # logging="ws_gemv_revet",  # Set to a string path if logging is needed
         )
@@ -737,7 +754,8 @@ def test_deepseekv3_ws_tile_mn_mk():
             w_gate_list=w_gate_list,
             w_up_list=w_up_list,
             w_down_list=w_down_list,
-            tile_F=16,
+            tile_F=TILE_F,
+            save_graph=False,
             simulate_rust=True,
             # logging="ws_gemv_reassemble",  # Set to a string path if logging is needed
         )
@@ -756,3 +774,37 @@ def test_deepseekv3_ws_tile_mn_mk():
     )
 
     check_gold_tensor(output.store_file_name, final_gold)
+
+    # ------------ substitue symbols in the off_chip_traffic and on_chip_requirement ------------
+    print(f"\n\n=================== TILE SIZE: {1} ===================")
+    print(f"Batch size: {B}")
+    print(f"Model config: {model_config}")
+    print(f"Tile F: {TILE_F}")
+
+    flops = sum(
+        [
+            (
+                2 * b * model_config.dim * model_config.moe_inter_dim * 3
+            )  # 3 (Linear layers)
+            + b * model_config.moe_inter_dim  # 1 (Element-wise mult)
+            + (
+                8 * b * model_config.dim * model_config.moe_inter_dim
+            )  # silu_flops: 1(neg)+4(exp)+1(add)+1(div)+1(mul)= 8 FLOPs per element
+            for b in expert_counts.tolist()
+        ]
+    )
+
+    print(f"Total flops: {flops}")
+
+    # substitue symbols in the off_chip_traffic
+    print(f"Total on-chip requirement (bytes): {on_chip_requirement}")
+    print(f"Total off-chip traffic (bytes): {off_chip_traffic}")
+
+    free_symbols = sorted(off_chip_traffic.free_symbols, key=str)
+    print(f"Free symbols: {free_symbols}")
+
+    sub_dict = {
+        symbol: value for symbol, value in zip(free_symbols, expert_counts.tolist())
+    }
+    off_chip_traffic_val = off_chip_traffic.subs(sub_dict)
+    print(f"Total off-chip traffic (bytes): {off_chip_traffic_val}")

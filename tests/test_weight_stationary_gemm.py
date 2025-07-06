@@ -437,6 +437,7 @@ def call_ws_tile_mn_mk_gemm_reshape(
     w_down_list: list[torch.Tensor],
     tile_N: int,
     tile_F: int,
+    save_graph: bool,
     simulate_rust: bool,
     logging: Optional[str] = None,
 ) -> tuple[StepOps, sympy.Expr, sympy.Expr]:
@@ -468,8 +469,9 @@ def call_ws_tile_mn_mk_gemm_reshape(
 
     step_graph = infer_broadcast(step_graph)
 
-    OUTPUT_FILENAME = "moe_expert_par_gemm_reshape"
-    save_graph_format(step_graph, OUTPUT_FILENAME, ["png"])
+    if save_graph:
+        OUTPUT_FILENAME = "moe_expert_par_gemm_reshape"
+        save_graph_format(step_graph, OUTPUT_FILENAME, ["png"])
 
     total_off_chip_traffic = sympy.Integer(0)
     total_on_chip_requirement = sympy.Integer(0)
@@ -528,19 +530,90 @@ class DeepSeekV316B:
 class SmallerDeepSeekV3:
     n_routed_experts = 64
     n_activated_experts = 6
-    dim = 64
-    moe_inter_dim = 128
+    dim = 64  # 2048 // 32 = 64
+    moe_inter_dim = 352  # 1408 // 4 (Can use tile size of 32)
 
 
 @dataclass
-class SmallerMixtral:
+class SmallerMixtral:  # 32x scaled down version for each dimension
     n_routed_experts = 8
     n_activated_experts = 2
-    dim = 64
-    moe_inter_dim = 128
+    dim = 128  # 4096/32
+    moe_inter_dim = 448  # 14336/32 (Can use tile size of 64)
 
 
-def test_deepseekv3_ws_tile_mn_mk():
+@dataclass
+class Mixtral8x7b:
+    n_routed_experts = 8
+    n_activated_experts = 2
+    dim = 4096
+    moe_inter_dim = 14336
+
+
+def get_expert_selection(
+    B: int, model_config, seed: Optional[int]
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if seed is None:
+        # Calculate ideal total that's divisible by number of experts
+        ideal_per_expert = (
+            B * model_config.n_activated_experts
+        ) // model_config.n_routed_experts
+        total_selections = ideal_per_expert * model_config.n_routed_experts
+
+        # Generate perfectly balanced expert assignments
+        expert_list = []
+        for expert_id in range(model_config.n_routed_experts):
+            expert_list.extend([expert_id] * ideal_per_expert)
+
+        # Shuffle and truncate/pad to fit your batch structure
+        import random
+
+        random.shuffle(expert_list)
+
+        # Reshape to fit your original structure (may need padding/truncating)
+        if len(expert_list) != B * model_config.n_activated_experts:
+            # Handle the mismatch - either pad or truncate
+            target_length = B * model_config.n_activated_experts
+            if len(expert_list) < target_length:
+                # Pad by cycling through experts
+                while len(expert_list) < target_length:
+                    expert_list.append(
+                        expert_list[len(expert_list) % model_config.n_routed_experts]
+                    )
+            else:
+                # Truncate
+                expert_list = expert_list[:target_length]
+
+        expert_indices = torch.tensor(expert_list).reshape(
+            B, model_config.n_activated_experts
+        )
+
+        expert_counts = torch.bincount(
+            expert_indices.flatten(), minlength=model_config.n_routed_experts
+        )
+
+        return (expert_indices, expert_counts)
+    else:
+        torch.manual_seed(seed)
+        # [B, n_activated_experts]
+        expert_indices = torch.topk(
+            torch.randn(B, model_config.n_routed_experts),
+            model_config.n_activated_experts,
+            dim=-1,
+        )[1]
+
+        # Get bincount across all batches [n_routed_experts]
+        expert_counts = torch.bincount(
+            expert_indices.flatten(), minlength=model_config.n_routed_experts
+        )
+
+        return (expert_indices, expert_counts)
+
+
+def run_ws_tile_mn_mk(tile_N: int):
+    # ------------ Sim Conig ------------
+    simulate_rust = True
+
     # ------------ Model Configuration ------------
     model_config = SmallerMixtral()
 
@@ -548,8 +621,8 @@ def test_deepseekv3_ws_tile_mn_mk():
     B = 64
 
     # ------------ Tile Configuration ------------
-    tile_N = 16  # M (The number of requests to chunk for the GEMM in each expert)
-    tile_F = 16  # K (The tile size used for the model_config.dim dimension)
+    tile_N = tile_N  # M (The number of requests to chunk for the GEMM in each expert)
+    tile_F = 32  # K (The tile size used for the model_config.dim dimension)
     # For the model_config.moe_inter_dim dimension, we don't tile
     # For Gate & Up linear, we use TileMN. For Down linear, we use TileMK.
 
@@ -567,19 +640,12 @@ def test_deepseekv3_ws_tile_mn_mk():
 
     # ------------ Expert Indices ------------
     # Set the random seed
-    torch.manual_seed(42)
+    seed = 5
+    torch.manual_seed(seed)
 
-    # [B, n_activated_experts]
-    expert_indices = torch.topk(
-        torch.randn(B, model_config.n_routed_experts),
-        model_config.n_activated_experts,
-        dim=-1,
-    )[1]
-
-    # Get bincount across all batches [n_routed_experts]
-    expert_counts = torch.bincount(
-        expert_indices.flatten(), minlength=model_config.n_routed_experts
-    )
+    # expert_indices: [B, n_activated_experts]
+    # expert_counts: [n_routed_experts] (bincount across all batches)
+    expert_indices, expert_counts = get_expert_selection(B, model_config, seed)
     print(f"Expert counts: {expert_counts}")
 
     # [B, n_routed_experts]
@@ -644,21 +710,88 @@ def test_deepseekv3_ws_tile_mn_mk():
         w_down_list=w_down_list,
         tile_F=tile_F,
         tile_N=tile_N,
-        simulate_rust=True,
+        save_graph=False,
+        simulate_rust=simulate_rust,
         # logging="expert_par_gemm_reshape",
     )
 
-    print(f"Total off-chip traffic: {off_chip_traffic}")
-    print(f"Total on-chip requirement: {on_chip_requirement}")
+    if simulate_rust:
+        # Gold calculation
+        final_gold = moe_gold_calc(
+            input_tensor,
+            expert_indices,
+            expert_weights,
+            linear_gate_list,
+            linear_up_list,
+            linear_down_list,
+        )
 
-    # Gold calculation
-    final_gold = moe_gold_calc(
-        input_tensor,
-        expert_indices,
-        expert_weights,
-        linear_gate_list,
-        linear_up_list,
-        linear_down_list,
+        check_gold_tensor(output.store_file_name, final_gold)
+
+    # ------------ substitue symbols in the off_chip_traffic and on_chip_requirement ------------
+    print(f"\n\n=================== TILE SIZE: {tile_N} ===================")
+    print(f"Batch size: {B}")
+    print(f"Model config: {model_config}")
+    print(f"Tile F: {tile_F}")
+
+    num_tiles = [
+        (routed_toks + tile_N - 1) // tile_N for routed_toks in expert_counts.tolist()
+    ]
+
+    after_pad_batch_dim = [num_tiles_i * tile_N for num_tiles_i in num_tiles]
+
+    padded_rows = [
+        total_toks - raw_toks
+        for total_toks, raw_toks in zip(after_pad_batch_dim, expert_counts.tolist())
+    ]
+
+    print(f"Padded rows: {padded_rows}")
+
+    flops = sum(
+        [
+            (
+                2 * b * model_config.dim * model_config.moe_inter_dim * 3
+            )  # 3 (Linear layers)
+            + b * model_config.moe_inter_dim  # 1 (Element-wise mult)
+            + (
+                8 * b * model_config.dim * model_config.moe_inter_dim
+            )  # silu_flops: 1(neg)+4(exp)+1(add)+1(div)+1(mul)= 8 FLOPs per element
+            for b in after_pad_batch_dim
+        ]
     )
 
-    check_gold_tensor(output.store_file_name, final_gold)
+    print(f"Total flops: {flops}")
+
+    padded_flops = sum(
+        [
+            (
+                2 * b * model_config.dim * model_config.moe_inter_dim * 3
+            )  # 3 (Linear layers)
+            + b * model_config.moe_inter_dim  # 1 (Element-wise mult)
+            + (
+                8 * b * model_config.dim * model_config.moe_inter_dim
+            )  # silu_flops: 1(neg)+4(exp)+1(add)+1(div)+1(mul)= 8 FLOPs per element
+            for b in padded_rows
+        ]
+    )
+
+    print(f"Total padded flops: {padded_flops}")
+
+    # substitue symbols in the off_chip_traffic
+    print(f"Total on-chip requirement (bytes): {on_chip_requirement}")
+    print(f"Total off-chip traffic (bytes): {off_chip_traffic}")
+
+    free_symbols = sorted(off_chip_traffic.free_symbols, key=str)
+    print(f"Free symbols: {free_symbols}")
+
+    sub_dict = {
+        symbol: value for symbol, value in zip(free_symbols, expert_counts.tolist())
+    }
+    off_chip_traffic_val = off_chip_traffic.subs(sub_dict)
+    print(f"Total off-chip traffic (bytes): {off_chip_traffic_val}")
+
+
+def test_mixtral_gemm_sweep():
+    tile_Ns = [4, 8, 16, 32, 64]
+    for tile_N in tile_Ns:
+        run_ws_tile_mn_mk(tile_N)
