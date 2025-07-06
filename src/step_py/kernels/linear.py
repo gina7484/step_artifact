@@ -6,7 +6,7 @@ from networkx import MultiDiGraph
 import torch
 
 from step_py.datatype import Stream
-from step_py.functions import map_fn, init_fn
+from step_py.functions import map_accum_fn, map_fn, init_fn
 from step_py.ops import *
 from step_py.utility_ops import *
 
@@ -89,7 +89,7 @@ def Linear(
         graph=step_graph,
         in1=formatted_input,
         in2=formatted_weight,
-        fn=map_fn.Matmul(),
+        fn=map_accum_fn.Matmul(),
         init_fn=init_fn.Zero(
             shape=(tile_config.m, tile_config.n),
             dtype=Float32(),
