@@ -1,12 +1,13 @@
+import csv
 import torch
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from typing import Tuple
 from networkx import MultiDiGraph
 
 from rewrite.broadcast import infer_broadcast
 from sim import HBMConfig, SimConfig, simulate
 from step_py.functions import init_fn, map_fn, map_accum_fn
-from step_py.kernels.linear import LinearTileConfig
+from step_py.kernels.linear import Linear, LinearTileConfig
 from step_py.ops import *
 from step_py.datatype import Stream
 from step_py.utility_ops import *
@@ -22,8 +23,9 @@ def gold_calc(
 ):
     gate = w_gate(input)
     up = w_up(input)
-    # down = w_down(up)
-    return (gate, up)
+    proj = up * torch.nn.functional.silu(gate)
+    down = w_down(proj)
+    return down
 
 
 @dataclass
@@ -61,6 +63,13 @@ class TinyExample:  # 32x scaled down version for each dimension
 
 
 @dataclass
+class SimpleExample:  # 32x scaled down version for each dimension
+    n_expert_sim = 1
+    dim = 256
+    moe_inter_dim = 512
+
+
+@dataclass
 class Mixtral8x7b:
     n_expert_sim = 1
     # n_routed_experts = 8
@@ -73,6 +82,31 @@ class Mixtral8x7b:
 class TilingSchedule:
     gate: str
     down: str
+
+
+@dataclass
+class ResultMetrics:
+    b: int
+    dim: int
+    moe_inter_dim: int
+    tiling_schedule: str
+    tile_m: int
+    tile_k: int
+    tile_n: int
+    tile_n_down: int
+    gate_up_compute_bw: int
+    act_fn_compute_bw: int
+    mult_compute_bw: int
+    down_compute_bw: int
+    flops: int
+    simulate_mode: str
+    mem_bw: int = 0  # GB/cycle
+    ridge_point: float = 0  # flops/byte
+    operational_intensity: float = 0  # flops/byte
+    cycles: int = 0
+    on_chip_requirement: int = 0
+    off_chip_traffic: int = 0
+    channel_depth: int = 0
 
 
 def create_gate_up_down_ops(
@@ -188,6 +222,8 @@ def test_expert_tiling_sweep():
 
     par_dispatch = 4
 
+    csv_filename = "expert_tiling_sweep.csv"
+
     # ------------ Model Configuration ------------
     model_config = TinyExample()
 
@@ -195,13 +231,10 @@ def test_expert_tiling_sweep():
     B = 32
 
     # ------------ Compute Bandwidths ------------
-    GATE_COMPUTE_BW = 1022
-    UP_COMPUTE_BW = 1022
+    GATE_UP_COMPUTE_BW = 1022
     ACT_FN_COMPUTE_BW = 1022
     MULT_COMPUTE_BW = 1022
     DOWN_COMPUTE_BW = 1022
-    WEIGHT_SCALE_COMPUTE_BW = 1022
-    ACCUM_COMPUTE_BW = 1022
 
     torch.manual_seed(42)
 
@@ -244,114 +277,537 @@ def test_expert_tiling_sweep():
         "mn_mkn": TilingSchedule(gate="mn", down="mkn"),
         "m_mn": TilingSchedule(gate="m", down="mn"),
         "m_m": TilingSchedule(gate="m", down="m"),
+        "kn_k": TilingSchedule(gate="kn", down="k"),
+        "kn_kn": TilingSchedule(gate="kn", down="kn"),
+        "k_none": TilingSchedule(gate="k", down="none"),
+        "k_n": TilingSchedule(gate="k", down="n"),
+        "n_k": TilingSchedule(gate="n", down="k"),
+        "n_kn": TilingSchedule(gate="n", down="kn"),
+        "none_n": TilingSchedule(gate="none", down="n"),
+        "none_none": TilingSchedule(gate="none", down="none"),
     }
 
-    tiling_schedule_name = "mn_mk"
-    tiling_schedule = tiling_schedule_list[tiling_schedule_name]
+    result_metrics_list = []
 
-    tile_m = B  # also tile_m_down
-    tile_k = model_config.dim
-    tile_n = model_config.moe_inter_dim  # also tile_k_down
-    tile_n_down = model_config.dim
+    tiling_schedule_to_test = list(tiling_schedule_list.keys())
+    for tiling_schedule_name in tiling_schedule_to_test:
+        tiling_schedule = tiling_schedule_list[tiling_schedule_name]
 
-    if tiling_schedule.gate == "mkn":
-        tile_k = 16
-        tile_n = 16
-    elif tiling_schedule.gate == "mk":
-        tile_k = 16
-    elif tiling_schedule.gate == "mn":
-        tile_n = 16
-
-    if tiling_schedule.down == "mkn" or tiling_schedule.down == "mn":
-        tile_n_down = 16
-
-    gate_up_linear_config = LinearTileConfig(m=tile_m, k=tile_k, n=tile_n)
-    down_linear_config = LinearTileConfig(m=tile_m, k=tile_n, n=tile_n_down)
-
-    # ------------ Step Graph ------------
-    step_graph = MultiDiGraph()
-
-    gate, up = create_gate_up_down_ops(
-        step_graph=step_graph,
-        input=input_tensor,
-        w_gate=w_gate_list[0],
-        w_up=w_up_list[0],
-        tile_config=gate_up_linear_config,
-        par_dispatch=par_dispatch,
-        write_back_mu=False,
-        comp_bw=GATE_COMPUTE_BW,
-    )
-
-    store_gate = OffChipStore(
-        graph=step_graph, input=gate, par_dispatch=par_dispatch, store_file_name="gate"
-    )
-
-    store_up = OffChipStore(
-        graph=step_graph, input=up, par_dispatch=par_dispatch, store_file_name="up"
-    )
-
-    step_graph = infer_broadcast(step_graph)
-
-    # ------------ Print Graph ------------
-    OUTPUT_FILENAME = f"expert_{tiling_schedule_name}"
-    save_graph_format(step_graph, OUTPUT_FILENAME, ["svg", "png"])
-
-    # ------------ Access-Reuse Analysis ------------
-    total_off_chip_traffic = sympy.Integer(0)
-    total_on_chip_requirement = sympy.Integer(0)
-
-    for node_tuple in step_graph.nodes(data=True):
-        node, data = node_tuple
-        if isinstance(node, StepOps):
-            total_off_chip_traffic = sympy.Add(
-                total_off_chip_traffic, node.off_chip_traffic()
-            )
-            total_on_chip_requirement = sympy.Add(
-                total_on_chip_requirement, node.on_chip_requirement()
-            )
+        # Tiling for M
+        if tiling_schedule.gate in ["kn", "k", "n", "none"]:
+            tile_m = B  # also tile_m_down
         else:
-            raise ValueError(f"Node {node} in the graph is not a StepOps")
+            tile_m = 16  # also tile_m_down
 
-    print(f"Total on-chip requirement (bytes): {total_on_chip_requirement}")
-    print(f"Total off-chip traffic (bytes): {total_off_chip_traffic}")
-
-    # ------------ Simulate ------------
-    if simulate_mode == "functional":
-        hbm_config = HBMConfig(64, 8, 2, 2, 1, 14)
-        sim_config = SimConfig(channel_depth=1)
-
-        if logging is None:
-            simulate(
-                step_graph,
-                False,  # logging
-                hbm_config,
-                sim_config,
-                "/home/ginasohn/step_tl/graph.pb",
-            )
+        # Tiling for K
+        if tiling_schedule.gate in ["mkn", "mk", "kn", "k"]:
+            tile_k = 16
         else:
-            assert isinstance(logging, str), "Logging must be a string path"
-            simulate(
-                step_graph,
-                True,  # logging
-                hbm_config,
-                sim_config,
-                "/home/ginasohn/step_tl/graph.pb",
-                logging,
-            )
+            tile_k = model_config.dim
 
-    elif simulate_mode == "timing":
-        pass
+        # Tiling for N
+        if tiling_schedule.gate in ["mkn", "mn", "kn", "n"]:
+            tile_n = 16
+        else:
+            tile_n = model_config.moe_inter_dim  # also tile_k_down
 
-    # ------------ Gold Calculation & Verification ------------
+        # Tiling for N_down
+        if tiling_schedule.down in ["mkn", "mn", "kn", "n"]:
+            tile_n_down = 16
+        else:
+            tile_n_down = model_config.dim
 
-    if check_gold:
-        gate, up = gold_calc(
-            input=input_tensor,
-            w_gate=linear_gate_list[0],
-            w_up=linear_up_list[0],
-            w_down=linear_down_list[0],
+        gate_up_linear_config = LinearTileConfig(m=tile_m, k=tile_k, n=tile_n)
+        down_linear_config = LinearTileConfig(m=tile_m, k=tile_n, n=tile_n_down)
+
+        result_metrics = ResultMetrics(
+            b=B,
+            dim=model_config.dim,
+            moe_inter_dim=model_config.moe_inter_dim,
+            tiling_schedule=tiling_schedule_name,
+            tile_m=tile_m,
+            tile_k=tile_k,
+            tile_n=tile_n,
+            tile_n_down=tile_n_down,
+            gate_up_compute_bw=GATE_UP_COMPUTE_BW,
+            act_fn_compute_bw=ACT_FN_COMPUTE_BW,
+            mult_compute_bw=MULT_COMPUTE_BW,
+            down_compute_bw=DOWN_COMPUTE_BW,
+            flops=sum(
+                [
+                    (
+                        2 * B * model_config.dim * model_config.moe_inter_dim * 3
+                    ),  # 3 (Linear layers)
+                    B * model_config.moe_inter_dim,  # 1 (Element-wise mult)
+                    (
+                        8 * B * model_config.dim * model_config.moe_inter_dim
+                    ),  # silu_flops: 1(neg)+4(exp)+1(add)+1(div)+1(mul)= 8 FLOPs per element
+                ]
+            ),
+            simulate_mode=simulate_mode,
         )
-        print(f"Gate: {store_gate.get_untiled_shape()}")
-        check_gold_tensor(store_gate.store_file_name, gate)
-        print(f"Up: {store_up.get_untiled_shape()}")
-        check_gold_tensor(store_up.store_file_name, up)
+
+        # ------------ Step Graph ------------
+        step_graph = MultiDiGraph()
+
+        gate, up = create_gate_up_down_ops(
+            step_graph=step_graph,
+            input=input_tensor,
+            w_gate=w_gate_list[0],
+            w_up=w_up_list[0],
+            tile_config=gate_up_linear_config,
+            par_dispatch=par_dispatch,
+            write_back_mu=False,
+            comp_bw=GATE_UP_COMPUTE_BW,
+        )  # [1, B // tile_m, DIM // tile_k] (tile: [tile_m, tile_k])
+
+        act_gate = UnaryMap(
+            graph=step_graph,
+            input=gate,
+            fn=map_fn.Silu(),
+            write_back_mu=False,
+            compute_bw=ACT_FN_COMPUTE_BW,
+        )  # [1, B // tile_m, DIM // tile_k] (tile: [tile_m, tile_k])
+
+        proj = BinaryMap(step_graph, act_gate, up, map_fn.Mul(), False, MULT_COMPUTE_BW)
+        # [1, B // tile_m, DIM // tile_k] (tile: [tile_m, tile_k])
+
+        down = Linear(
+            step_graph=step_graph,
+            input=proj,
+            weight=w_down_list[0],
+            tile_config=down_linear_config,
+            comp_bw=DOWN_COMPUTE_BW,
+            write_back_mu=True,
+            par_dispatch=par_dispatch,
+        )
+
+        output = OffChipStore(
+            graph=step_graph,
+            input=down,
+            par_dispatch=par_dispatch,
+            store_file_name="output",
+        )
+
+        step_graph = infer_broadcast(step_graph)
+
+        # ------------ Print Graph ------------
+        OUTPUT_FILENAME = (
+            f"expert_{tiling_schedule_name}_{tile_m}_{tile_k}_{tile_n}_{tile_n_down}"
+        )
+        save_graph_format(step_graph, OUTPUT_FILENAME, ["svg", "png"])
+
+        # ------------ Access-Reuse Analysis ------------
+        total_off_chip_traffic = sympy.Integer(0)
+        total_on_chip_requirement = sympy.Integer(0)
+
+        for node_tuple in step_graph.nodes(data=True):
+            node, data = node_tuple
+            if isinstance(node, StepOps):
+                total_off_chip_traffic = sympy.Add(
+                    total_off_chip_traffic, node.off_chip_traffic()
+                )
+                total_on_chip_requirement = sympy.Add(
+                    total_on_chip_requirement, node.on_chip_requirement()
+                )
+            else:
+                raise ValueError(f"Node {node} in the graph is not a StepOps")
+
+        print(f"Total on-chip requirement (bytes): {total_on_chip_requirement}")
+        print(f"Total off-chip traffic (bytes): {total_off_chip_traffic}")
+
+        result_metrics.on_chip_requirement = int(total_on_chip_requirement)  # bytes
+        result_metrics.off_chip_traffic = int(total_off_chip_traffic)  # bytes
+        result_metrics.operational_intensity = (
+            result_metrics.flops / result_metrics.off_chip_traffic
+        )  # flops/byte
+
+        # ------------ Simulate ------------
+        cycles = None
+        if simulate_mode == "functional":
+            n_channel = 8
+            channel_depth = 1
+            hbm_config = HBMConfig(64, n_channel, 2, 2, 1, 14)
+            sim_config = SimConfig(channel_depth=channel_depth)
+
+            result_metrics.mem_bw = n_channel * 32  # 32 bytes/cycle per channel
+            result_metrics.channel_depth = channel_depth
+            result_metrics.ridge_point = (
+                sum(
+                    [
+                        result_metrics.gate_up_compute_bw,
+                        result_metrics.act_fn_compute_bw,
+                        result_metrics.mult_compute_bw,
+                        result_metrics.down_compute_bw,
+                    ]
+                )  # FLOPs/cycle
+                / result_metrics.mem_bw  # bytes/cycle
+            )  # FLOPs/byte
+
+            if logging is None:
+                cycles = simulate(
+                    step_graph,
+                    False,  # logging
+                    hbm_config,
+                    sim_config,
+                    "/home/ginasohn/step_tl/graph.pb",
+                )
+            else:
+                assert isinstance(logging, str), "Logging must be a string path"
+                cycles = simulate(
+                    step_graph,
+                    True,  # logging
+                    hbm_config,
+                    sim_config,
+                    "/home/ginasohn/step_tl/graph.pb",
+                    logging,
+                )
+
+            result_metrics.cycles = cycles
+
+        elif simulate_mode == "timing":
+            pass
+
+        # ------------ Gold Calculation & Verification ------------
+
+        if check_gold:
+            down = gold_calc(
+                input=input_tensor,
+                w_gate=linear_gate_list[0],
+                w_up=linear_up_list[0],
+                w_down=linear_down_list[0],
+            )
+            print(f"Down: {output.get_untiled_shape()}")
+            check_gold_tensor(output.store_file_name, down)
+
+        result_metrics_list.append(result_metrics)
+
+    # ------------ Save to CSV ------------
+    if csv_filename is not None:
+        field_names = [field.name for field in fields(ResultMetrics)]
+
+        with open(csv_filename, "w", newline="", encoding="utf-8") as csvfile:
+            writer = csv.DictWriter(csvfile, fieldnames=field_names)
+
+            # Write header
+            writer.writeheader()
+
+            # Write data rows
+            for metrics in result_metrics_list:
+                # Convert dataclass instance to dictionary
+                row_data = {
+                    field.name: getattr(metrics, field.name)
+                    for field in fields(metrics)
+                }
+                writer.writerow(row_data)
+
+
+def test_expert_tiling_sweep_single_schedule():
+    # ------------ Tiling Schedule ------------
+    tiling_schedule_list = {
+        "mkn_mk": TilingSchedule(gate="mkn", down="mk"),
+        "mkn_mkn": TilingSchedule(gate="mkn", down="mkn"),
+        "mk_m": TilingSchedule(gate="mk", down="m"),
+        "mk_mn": TilingSchedule(gate="mk", down="mn"),
+        "mn_mk": TilingSchedule(gate="mn", down="mk"),
+        "mn_mkn": TilingSchedule(gate="mn", down="mkn"),
+        "m_mn": TilingSchedule(gate="m", down="mn"),
+        "m_m": TilingSchedule(gate="m", down="m"),
+        "kn_k": TilingSchedule(gate="kn", down="k"),
+        "kn_kn": TilingSchedule(gate="kn", down="kn"),
+        "k_none": TilingSchedule(gate="k", down="none"),
+        "k_n": TilingSchedule(gate="k", down="n"),
+        "n_k": TilingSchedule(gate="n", down="k"),
+        "n_kn": TilingSchedule(gate="n", down="kn"),
+        "none_n": TilingSchedule(gate="none", down="n"),
+        "none_none": TilingSchedule(gate="none", down="none"),
+    }
+
+    # ------------ Sim Conig ------------
+    simulate_mode = "functional"
+    # simulate_mode = "timing"
+    # simulate_mode = None
+
+    check_gold = True
+
+    logging = None
+
+    par_dispatch = 4
+
+    tiling_schedule_name = "mn_mk"
+    csv_filename = f"expert_tiling_sweep_{tiling_schedule_name}.csv"
+
+    # ------------ Model Configuration ------------
+    model_config = SimpleExample()
+
+    # ------------ Batch Size ------------
+    B = 64
+
+    # ------------ Compute Bandwidths ------------
+    GATE_UP_COMPUTE_BW = 1022
+    ACT_FN_COMPUTE_BW = 1022
+    MULT_COMPUTE_BW = 1022
+    DOWN_COMPUTE_BW = 1022
+
+    torch.manual_seed(42)
+
+    # ------------ Input generation ------------
+    input_tensor = torch.randn(B, model_config.dim)
+
+    # ------------ Expert Weights (gate, up, down) ------------
+    linear_gate_list = [
+        torch.nn.Linear(model_config.dim, model_config.moe_inter_dim, bias=False)
+        for _ in range(model_config.n_expert_sim)
+    ]
+    linear_up_list = [
+        torch.nn.Linear(model_config.dim, model_config.moe_inter_dim, bias=False)
+        for _ in range(model_config.n_expert_sim)
+    ]
+    linear_down_list = [
+        torch.nn.Linear(model_config.moe_inter_dim, model_config.dim, bias=False)
+        for _ in range(model_config.n_expert_sim)
+    ]
+
+    w_gate_list = [
+        linear_gate.weight.T.detach().clone().contiguous()
+        for linear_gate in linear_gate_list
+    ]
+    w_up_list = [
+        linear_up.weight.T.detach().clone().contiguous() for linear_up in linear_up_list
+    ]
+    w_down_list = [
+        linear_down.weight.T.detach().clone().contiguous()
+        for linear_down in linear_down_list
+    ]
+
+    result_metrics_list = []
+
+    tiling_schedule_to_test = [
+        {"tile_m": 16, "tile_n": 16},
+        {"tile_m": 16, "tile_n": 32},
+        {"tile_m": 16, "tile_n": 64},
+        {"tile_m": 16, "tile_n": 128},
+        {"tile_m": 16, "tile_n": 256},
+        {"tile_m": 32, "tile_n": 16},
+        {"tile_m": 32, "tile_n": 32},
+        {"tile_m": 32, "tile_n": 64},
+        {"tile_m": 32, "tile_n": 128},
+        {"tile_m": 32, "tile_n": 256},
+        {"tile_m": 64, "tile_n": 16},
+        {"tile_m": 64, "tile_n": 32},
+        {"tile_m": 64, "tile_n": 64},
+        {"tile_m": 64, "tile_n": 128},
+        {"tile_m": 64, "tile_n": 256},
+    ]
+    for idx, tiling_size in enumerate(tiling_schedule_to_test):
+        tiling_schedule = tiling_schedule_list[
+            tiling_schedule_name
+        ]  # TODO: change to tiling_size
+
+        # Tiling for M
+        if tiling_schedule.gate in ["kn", "k", "n", "none"]:
+            tile_m = B  # also tile_m_down
+        else:
+            tile_m = tiling_size["tile_m"]  # also tile_m_down
+
+        # Tiling for K
+        if tiling_schedule.gate in ["mkn", "mk", "kn", "k"]:
+            tile_k = tiling_size["tile_k"]
+        else:
+            tile_k = model_config.dim
+
+        # Tiling for N
+        if tiling_schedule.gate in ["mkn", "mn", "kn", "n"]:
+            tile_n = tiling_size["tile_n"]
+        else:
+            tile_n = model_config.moe_inter_dim  # also tile_k_down
+
+        # Tiling for N_down
+        if tiling_schedule.down in ["mkn", "mn", "kn", "n"]:
+            tile_n_down = tiling_size["tile_n_down"]
+        else:
+            tile_n_down = model_config.dim
+
+        gate_up_linear_config = LinearTileConfig(m=tile_m, k=tile_k, n=tile_n)
+        down_linear_config = LinearTileConfig(m=tile_m, k=tile_n, n=tile_n_down)
+
+        result_metrics = ResultMetrics(
+            b=B,
+            dim=model_config.dim,
+            moe_inter_dim=model_config.moe_inter_dim,
+            tiling_schedule=tiling_schedule_name,
+            tile_m=tile_m,
+            tile_k=tile_k,
+            tile_n=tile_n,
+            tile_n_down=tile_n_down,
+            gate_up_compute_bw=GATE_UP_COMPUTE_BW,
+            act_fn_compute_bw=ACT_FN_COMPUTE_BW,
+            mult_compute_bw=MULT_COMPUTE_BW,
+            down_compute_bw=DOWN_COMPUTE_BW,
+            flops=sum(
+                [
+                    (
+                        2 * B * model_config.dim * model_config.moe_inter_dim * 3
+                    ),  # 3 (Linear layers)
+                    B * model_config.moe_inter_dim,  # 1 (Element-wise mult)
+                    (
+                        8 * B * model_config.dim * model_config.moe_inter_dim
+                    ),  # silu_flops: 1(neg)+4(exp)+1(add)+1(div)+1(mul)= 8 FLOPs per element
+                ]
+            ),
+            simulate_mode=simulate_mode,
+        )
+
+        # ------------ Step Graph ------------
+        step_graph = MultiDiGraph()
+
+        gate, up = create_gate_up_down_ops(
+            step_graph=step_graph,
+            input=input_tensor,
+            w_gate=w_gate_list[0],
+            w_up=w_up_list[0],
+            tile_config=gate_up_linear_config,
+            par_dispatch=par_dispatch,
+            write_back_mu=False,
+            comp_bw=GATE_UP_COMPUTE_BW,
+        )  # [1, B // tile_m, DIM // tile_k] (tile: [tile_m, tile_k])
+
+        act_gate = UnaryMap(
+            graph=step_graph,
+            input=gate,
+            fn=map_fn.Silu(),
+            write_back_mu=False,
+            compute_bw=ACT_FN_COMPUTE_BW,
+        )  # [1, B // tile_m, DIM // tile_k] (tile: [tile_m, tile_k])
+
+        proj = BinaryMap(step_graph, act_gate, up, map_fn.Mul(), False, MULT_COMPUTE_BW)
+        # [1, B // tile_m, DIM // tile_k] (tile: [tile_m, tile_k])
+
+        down = Linear(
+            step_graph=step_graph,
+            input=proj,
+            weight=w_down_list[0],
+            tile_config=down_linear_config,
+            comp_bw=DOWN_COMPUTE_BW,
+            write_back_mu=True,
+            par_dispatch=par_dispatch,
+        )
+
+        output = OffChipStore(
+            graph=step_graph,
+            input=down,
+            par_dispatch=par_dispatch,
+            store_file_name="output",
+        )
+
+        step_graph = infer_broadcast(step_graph)
+
+        # ------------ Print Graph ------------
+        OUTPUT_FILENAME = (
+            f"expert_{tiling_schedule_name}_{tile_m}_{tile_k}_{tile_n}_{tile_n_down}"
+        )
+        save_graph_format(step_graph, OUTPUT_FILENAME, ["svg", "png"])
+
+        # ------------ Access-Reuse Analysis ------------
+        total_off_chip_traffic = sympy.Integer(0)
+        total_on_chip_requirement = sympy.Integer(0)
+
+        for node_tuple in step_graph.nodes(data=True):
+            node, data = node_tuple
+            if isinstance(node, StepOps):
+                total_off_chip_traffic = sympy.Add(
+                    total_off_chip_traffic, node.off_chip_traffic()
+                )
+                total_on_chip_requirement = sympy.Add(
+                    total_on_chip_requirement, node.on_chip_requirement()
+                )
+            else:
+                raise ValueError(f"Node {node} in the graph is not a StepOps")
+
+        print(f"Total on-chip requirement (bytes): {total_on_chip_requirement}")
+        print(f"Total off-chip traffic (bytes): {total_off_chip_traffic}")
+
+        result_metrics.on_chip_requirement = int(total_on_chip_requirement)  # bytes
+        result_metrics.off_chip_traffic = int(total_off_chip_traffic)  # bytes
+        result_metrics.operational_intensity = (
+            result_metrics.flops / result_metrics.off_chip_traffic
+        )  # flops/byte
+
+        # ------------ Simulate ------------
+        cycles = None
+        if simulate_mode == "functional":
+            n_channel = 8
+            channel_depth = 1
+            hbm_config = HBMConfig(64, n_channel, 2, 2, 1, 14)
+            sim_config = SimConfig(channel_depth=channel_depth)
+
+            result_metrics.mem_bw = n_channel * 32  # 32 bytes/cycle per channel
+            result_metrics.channel_depth = channel_depth
+            result_metrics.ridge_point = (
+                sum(
+                    [
+                        result_metrics.gate_up_compute_bw,
+                        result_metrics.act_fn_compute_bw,
+                        result_metrics.mult_compute_bw,
+                        result_metrics.down_compute_bw,
+                    ]
+                )  # FLOPs/cycle
+                / result_metrics.mem_bw  # bytes/cycle
+            )  # FLOPs/byte
+
+            if logging is None:
+                cycles = simulate(
+                    step_graph,
+                    False,  # logging
+                    hbm_config,
+                    sim_config,
+                    "/home/ginasohn/step_tl/graph.pb",
+                )
+            else:
+                assert isinstance(logging, str), "Logging must be a string path"
+                cycles = simulate(
+                    step_graph,
+                    True,  # logging
+                    hbm_config,
+                    sim_config,
+                    "/home/ginasohn/step_tl/graph.pb",
+                    logging,
+                )
+
+            result_metrics.cycles = cycles
+
+        elif simulate_mode == "timing":
+            pass
+
+        # ------------ Gold Calculation & Verification ------------
+
+        if check_gold:
+            down = gold_calc(
+                input=input_tensor,
+                w_gate=linear_gate_list[0],
+                w_up=linear_up_list[0],
+                w_down=linear_down_list[0],
+            )
+            print(f"Down: {output.get_untiled_shape()}")
+            check_gold_tensor(output.store_file_name, down)
+
+        result_metrics_list.append(result_metrics)
+
+    # ------------ Save to CSV ------------
+    if csv_filename is not None:
+        field_names = [field.name for field in fields(ResultMetrics)]
+
+        with open(csv_filename, "w", newline="", encoding="utf-8") as csvfile:
+            writer = csv.DictWriter(csvfile, fieldnames=field_names)
+
+            # Write header
+            writer.writeheader()
+
+            # Write data rows
+            for metrics in result_metrics_list:
+                # Convert dataclass instance to dictionary
+                row_data = {
+                    field.name: getattr(metrics, field.name)
+                    for field in fields(metrics)
+                }
+                writer.writerow(row_data)

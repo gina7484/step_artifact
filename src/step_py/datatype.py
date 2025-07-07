@@ -24,6 +24,9 @@ class Float16(ElementTP):
         """Return the size of Float16 in bytes."""
         return sympy.Integer(2)
 
+    def __str__(self) -> str:
+        return "Float16"
+
 
 class Float32(ElementTP):
     def __eq__(self, value):
@@ -34,6 +37,9 @@ class Float32(ElementTP):
     def size_in_bytes(self) -> sympy.Expr:
         """Return the size of Float32 in bytes."""
         return sympy.Integer(4)
+
+    def __str__(self) -> str:
+        return "Float32"
 
 
 @dataclass
@@ -51,6 +57,9 @@ class DynTile:
                 total_elements = total_elements * dim
         return sympy.simplify(total_elements * self.tile_dtype.size_in_bytes())
 
+    def __str__(self) -> str:
+        return f"Tile({self.tile_dtype}, {self.shape})"
+
 
 @dataclass
 class Tile:
@@ -61,6 +70,9 @@ class Tile:
         """Return the total size of this tile in bytes."""
         tile_size = sympy.Integer(self.shape[0] * self.shape[1])
         return sympy.simplify(tile_size * self.tile_dtype.size_in_bytes())
+
+    def __str__(self) -> str:
+        return f"Tile({self.tile_dtype}, {self.shape})"
 
 
 @dataclass
@@ -93,6 +105,9 @@ class Buffer:
             else:
                 total_elements = total_elements * dim
         return sympy.simplify(total_elements * self.buff_dtype.size_in_bytes())
+
+    def __str__(self) -> str:
+        return f"Buffer({self.buff_dtype}, {self.shape})"
 
 
 class Select(ABC):
