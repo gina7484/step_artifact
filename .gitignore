@@ -9,3 +9,5 @@
 target/
 .github/
 .pytest_cache/
+*.txt
+*.csv
