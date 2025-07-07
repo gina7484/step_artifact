@@ -3,7 +3,7 @@ from step_py.kernels.linear import Linear, LinearTileConfig
 from step_py.ops import *
 from step_py.utility_ops import *
 from step_py.functions import map_fn
-from sim import simulate, HBMConfig
+from sim import SimConfig, simulate, HBMConfig
 from utils.shape_checking import is_valid_view
 from utils.gold_checking import check_gold_tensor
 from utils.draw_graph import save_graph_format
@@ -63,6 +63,7 @@ def test_linear_mk_offchip():
         step_graph,
         False,  # logging
         HBMConfig(64, 8, 2, 2, 1, 14),
+        SimConfig(channel_depth=1),
         "/home/ginasohn/step_tl/graph.pb",
     )
 
@@ -128,6 +129,7 @@ def test_linear_mk_onchip():
         step_graph,
         False,  # logging
         HBMConfig(64, 8, 2, 2, 1, 14),
+        SimConfig(channel_depth=1),
         "/home/ginasohn/step_tl/graph.pb",
     )
 
@@ -183,6 +185,7 @@ def test_linear_mn_offchip():
         step_graph,
         False,  # logging
         HBMConfig(64, 8, 2, 2, 1, 14),
+        SimConfig(channel_depth=1),
         "/home/ginasohn/step_tl/graph.pb",
     )
 
@@ -250,6 +253,7 @@ def test_linear_mn_onchip():
         step_graph,
         False,  # logging
         HBMConfig(64, 8, 2, 2, 1, 14),
+        SimConfig(channel_depth=1),
         "/home/ginasohn/step_tl/graph.pb",
     )
 
@@ -305,6 +309,7 @@ def test_linear_mnk_offchip():
         step_graph,
         False,  # logging
         HBMConfig(64, 8, 2, 2, 1, 14),
+        SimConfig(channel_depth=1),
         "/home/ginasohn/step_tl/graph.pb",
     )
 
@@ -370,6 +375,7 @@ def test_linear_mnk_onchip():
         step_graph,
         False,  # logging
         HBMConfig(64, 8, 2, 2, 1, 14),
+        SimConfig(channel_depth=1),
         "/home/ginasohn/step_tl/graph.pb",
     )
 

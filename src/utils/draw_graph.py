@@ -54,12 +54,22 @@ def save_graph_format(
                 [
                     str(node_id),
                     "-------------",
+                    "output stream shape:",
                     str([out_i.shape for out_i in node_id.stream_list]),
+                    "data type:",
+                    str(node_id.stream_list[0].stream_dtype),
                 ]
             )
         else:
             n.attr["label"] = "\n".join(
-                [str(node_id), "-------------", str(node_id.stream.shape)]
+                [
+                    str(node_id),
+                    "-------------",
+                    "output stream shape:",
+                    str(node_id.stream.shape),
+                    "data type:",
+                    str(node_id.stream.stream_dtype),
+                ]
             )
 
     if subgraph_nodes is not None:

@@ -55,6 +55,14 @@ class PrinterContext(StepOps):
             raise ValueError("The shape of the input stream shouldn't change")
         self._input = new_input
 
+    def off_chip_traffic(self) -> int:
+        """Return the off-chip traffic for this operation."""
+        return 0
+
+    def on_chip_requirement(self, count_fifos: bool = False) -> int:
+        """Return the on-chip memory requirement for this operation."""
+        return 0
+
 
 class ConsumerContext(StepOps):
     _input: Union[StepOps, Tuple[StepOps, int]]
@@ -104,18 +112,26 @@ class ConsumerContext(StepOps):
             raise ValueError("The shape of the input stream shouldn't change")
         self._input = new_input
 
+    def off_chip_traffic(self) -> int:
+        """Return the off-chip traffic for this operation."""
+        return 0
+
+    def on_chip_requirement(self, count_fifos: bool = False) -> int:
+        """Return the on-chip memory requirement for this operation."""
+        return 0
+
 
 class SelectGen(StepOps):
     underlying: torch.Tensor
     is_multihot: bool
     _stream: Stream
 
-    def __init__(self, is_multihot: bool, tensor: torch.Tensor):
+    def __init__(self, is_multihot: bool, tensor: torch.Tensor, n: int):
         super().__init__()
         self.is_multihot = is_multihot
         self.underlying = tensor
 
-        dtype = MultiHot() if is_multihot else Index()
+        dtype = MultiHot(n) if is_multihot else Index(n)
         self._stream = Stream(stream_dtype=dtype, shape=(1,) + tuple(tensor.shape[:-1]))
 
     @property
@@ -156,3 +172,11 @@ class SelectGen(StepOps):
         raise NotImplementedError(
             "Shouldn't be called for nodes that doesn't have an input stream"
         )
+
+    def off_chip_traffic(self) -> int:
+        """Return the off-chip traffic for this operation."""
+        return 0
+
+    def on_chip_requirement(self, count_fifos: bool = False) -> int:
+        """Return the on-chip memory requirement for this operation."""
+        return 0

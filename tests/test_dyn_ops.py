@@ -9,7 +9,7 @@ from step_py.functions import map_fn, init_fn
 from utils.gold_checking import check_gold_tensor
 from utils.draw_graph import save_graph_format
 from rewrite.broadcast import infer_broadcast
-from utils.moe_gold_calc import moe_linear_gold_calc_batched
+from utils.moe import moe_linear_gold_calc_batched
 
 
 def test_0d_partition_onehot():
@@ -37,10 +37,7 @@ def test_0d_partition_onehot():
 
     # ===================== Expert Selection Stream =====================
     print(f"Expert selection: \n{routing_expert_selection}")
-    control = SelectGen(
-        is_multihot=True,
-        tensor=routing_expert_selection,
-    )
+    control = SelectGen(is_multihot=True, tensor=routing_expert_selection, n=EXPERT)
     print(f"Control stream shape: {control.stream.shape}")
 
     # ===================== Tiling Config =====================
@@ -105,10 +102,7 @@ def test_0d_partition_multihot():
 
     # ===================== Expert Selection Stream =====================
     print(f"Expert selection: \n{expert_selection_multi_hot}")
-    control = SelectGen(
-        is_multihot=True,
-        tensor=expert_selection_multi_hot,
-    )
+    control = SelectGen(is_multihot=True, tensor=expert_selection_multi_hot, n=EXPERT)
     print(f"Control stream shape: {control.stream.shape}")
 
     # ===================== Tiling Config =====================
@@ -174,6 +168,7 @@ def test_0d_partition_onehot_dyn_load():
     control = SelectGen(
         is_multihot=True,
         tensor=routing_expert_selection,
+        n=EXPERT,
     )
     # print(f"Control stream shape: {control.stream.shape}")
 
@@ -258,10 +253,7 @@ def test_0d_partition_onehot_dyn_load_reassemble():
 
     # ===================== Expert Selection Stream =====================
     print(f"Expert selection: \n{routing_expert_selection}")
-    control = SelectGen(
-        is_multihot=True,
-        tensor=routing_expert_selection,
-    )
+    control = SelectGen(is_multihot=True, tensor=routing_expert_selection, n=EXPERT)
     print(f"Control stream shape: {control.stream.shape}")  # [B,N]
 
     # ===================== Tiling Config =====================

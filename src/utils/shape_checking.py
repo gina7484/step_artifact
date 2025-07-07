@@ -1,11 +1,19 @@
 import torch
-from typing import Tuple
+from typing import Tuple, Union
+
+from step_py.dyndim import DynDim
 
 
-def is_valid_view(tensor: torch.Tensor, new_shape: Tuple[int, ...]) -> bool:
+def is_valid_view(
+    tensor: torch.Tensor, new_shape: Tuple[Union[int, DynDim], ...]
+) -> bool:
     """Check if view is valid by attempting it"""
+    if any(isinstance(dim, DynDim) for dim in new_shape):
+        print("DynDim in shape")
+        return False
+
     try:
-        tensor.view(*new_shape)
+        tensor.view(*new_shape)  # type: ignore
         return True
     except RuntimeError:
         return False

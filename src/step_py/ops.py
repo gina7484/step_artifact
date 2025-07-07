@@ -1,8 +1,11 @@
 from abc import ABC, abstractmethod
 from sympy import ceiling
 import torch
-from typing import List, Tuple, Union
+from typing import List, Optional, Tuple, Union
+from step_py.dyndim import DynDim
+from step_py.functions.accum_fn import AccumFn
 from step_py.functions.init_fn import InitFn
+from step_py.functions.map_accum_fn import MapAccumFn
 from step_py.functions.map_fn import MapFn
 from step_py.datatype import Buffer, Stream, Tile, Select, Float16, Float32
 from networkx import MultiDiGraph
@@ -21,7 +24,7 @@ def get_stream(input: Union["StepOps", Tuple["StepOps", int]]) -> Stream:
         input_node, stream_idx = input
         return input_node.stream_idx(stream_idx)
     else:
-        raise TypeError("Wrong input type!")
+        raise TypeError(f"Wrong input type! Input: {input} (type:{type(input)})")
 
 
 class StepOps(ABC):
@@ -64,6 +67,16 @@ class StepOps(ABC):
         org_input: Union["StepOps", Tuple["StepOps", int]],
         new_input: Union["StepOps", Tuple["StepOps", int]],
     ):
+        pass
+
+    @abstractmethod
+    def on_chip_requirement(self, count_fifos: bool = False) -> sympy.Expr:
+        """Return the on-chip memory requirement for this operation."""
+        pass
+
+    @abstractmethod
+    def off_chip_traffic(self) -> sympy.Expr:
+        """Return the off-chip traffic (bytes) for this operation."""
         pass
 
 
@@ -165,6 +178,17 @@ class OffChipLoad(StepOps):
             "Shouldn't be called for nodes that doesn't have an input stream"
         )
 
+    def off_chip_traffic(self) -> sympy.Expr:
+        """Return the off-chip traffic for this operation."""
+        total_elements = self._stream.total_elements() * sympy.Integer(
+            self.tile_row * self.tile_col * self.n_byte
+        )
+        return sympy.simplify(sympy.Mul(total_elements, sympy.Integer(self.n_byte)))
+
+    def on_chip_requirement(self, count_fifos: bool = False) -> sympy.Expr:
+        """Return the on-chip memory requirement for this operation."""
+        return sympy.Integer(self.tile_row * self.tile_col * self.n_byte)
+
 
 class DynOffChipLoad(StepOps):
     ref: Union[StepOps, Tuple[StepOps, int]]
@@ -209,6 +233,7 @@ class DynOffChipLoad(StepOps):
         ref_node = ref if isinstance(ref, StepOps) else ref[0]
         graph.add_edge(ref_node, self)
 
+        ref_stream: Stream = get_stream(ref)
         if underlying.dtype == torch.float32:
             self.n_byte = 4
 
@@ -216,7 +241,6 @@ class DynOffChipLoad(StepOps):
                 tile_dtype=Float32(),
                 shape=(tile_row, tile_col),
             )
-            ref_stream: Stream = get_stream(ref)
             self._stream = Stream(
                 stream_dtype=stream_dtype, shape=ref_stream.shape + self.out_shape_tiled
             )
@@ -227,7 +251,6 @@ class DynOffChipLoad(StepOps):
                 tile_dtype=Float16(),
                 shape=(tile_row, tile_col),
             )
-            ref_stream: Stream = get_stream(ref)
             self._stream = Stream(
                 stream_dtype=stream_dtype, shape=ref_stream.shape + self.out_shape_tiled
             )
@@ -268,6 +291,17 @@ class DynOffChipLoad(StepOps):
         if get_stream(self.ref) != get_stream(new_input):
             raise ValueError("The shape of the input stream shouldn't change")
         self.ref = new_input
+
+    def off_chip_traffic(self) -> sympy.Expr:
+        """Return the off-chip traffic for this operation."""
+        total_elements = self._stream.total_elements() * sympy.Integer(
+            self.tile_row * self.tile_col * self.n_byte
+        )
+        return sympy.simplify(sympy.Mul(total_elements, sympy.Integer(self.n_byte)))
+
+    def on_chip_requirement(self, count_fifos: bool = False) -> sympy.Expr:
+        """Return the on-chip memory requirement for this operation."""
+        return sympy.Integer(self.tile_row * self.tile_col * self.n_byte)
 
 
 class RepeatStatic(StepOps):
@@ -328,6 +362,20 @@ class RepeatStatic(StepOps):
         if get_stream(self.input) != get_stream(new_input):
             raise ValueError("The shape of the input stream shouldn't change")
         self._input = new_input
+
+    def off_chip_traffic(self) -> sympy.Expr:
+        """Return the off-chip traffic for this operation."""
+        return sympy.Integer(0)
+
+    def on_chip_requirement(self, count_fifos: bool = False) -> sympy.Expr:
+        """Return the on-chip memory requirement for this operation."""
+        # Get the size of the stream's data type
+        stream_size: sympy.Expr = self._stream.stream_dtype.size_in_bytes()
+
+        if count_fifos:
+            return sympy.simplify(sympy.Mul(stream_size, sympy.Integer(2)))
+        else:
+            return stream_size
 
 
 class Promote(StepOps):
@@ -390,6 +438,19 @@ class Promote(StepOps):
         if get_stream(self.input) != get_stream(new_input):
             raise ValueError("The shape of the input stream shouldn't change")
         self._input = new_input
+
+    def off_chip_traffic(self) -> sympy.Expr:
+        """Return the off-chip traffic for this operation."""
+        return sympy.Integer(0)
+
+    def on_chip_requirement(self, count_fifos: bool = False) -> sympy.Expr:
+        """Return the on-chip memory requirement for this operation."""
+        if not count_fifos:
+            return sympy.Integer(0)
+
+        # Get the size of the stream's data type
+        stream_size: sympy.Expr = self._stream.stream_dtype.size_in_bytes()
+        return sympy.simplify(sympy.Mul(stream_size, sympy.Integer(2)))
 
 
 class BinaryMap(StepOps):
@@ -482,11 +543,45 @@ class BinaryMap(StepOps):
         else:
             raise ValueError("Wrong org_input")
 
+    def off_chip_traffic(self) -> sympy.Expr:
+        """Return the off-chip traffic for this operation."""
+        return sympy.Integer(0)
+
+    def on_chip_requirement(self, count_fifos: bool = False) -> sympy.Expr:
+        """Return the on-chip memory requirement for this operation."""
+        if not count_fifos:
+            return sympy.Integer(0)
+
+        # Get streams for inputs
+        in1_stream = get_stream(self.in1)
+        in2_stream = get_stream(self.in2)
+
+        # Calculate tile sizes in bytes for each stream
+        assert not isinstance(
+            in1_stream.stream_dtype, Buffer
+        ), "Input stream must be a Tile type."
+        assert not isinstance(
+            in2_stream.stream_dtype, Buffer
+        ), "Input stream must be a Tile type."
+        assert not isinstance(
+            self._stream.stream_dtype, Buffer
+        ), "Input stream must be a Tile type."
+
+        in1_stream_dtype_size = in1_stream.stream_dtype.size_in_bytes()
+        in2_stream_dtype_size = in2_stream.stream_dtype.size_in_bytes()
+        out_stream_dtype_size = self._stream.stream_dtype.size_in_bytes()
+
+        return sympy.simplify(
+            sympy.Add(
+                in1_stream_dtype_size, in2_stream_dtype_size, out_stream_dtype_size
+            )
+        )
+
 
 class BinaryMapAccum(StepOps):
     in1: Union[StepOps, Tuple[StepOps, int]]
     in2: Union[StepOps, Tuple[StepOps, int]]
-    fn: MapFn
+    fn: MapAccumFn
     init_fn: InitFn
     rank: int
     write_back_mu: bool  # whether the consumer is a bufferize or not
@@ -499,7 +594,7 @@ class BinaryMapAccum(StepOps):
         graph: MultiDiGraph,
         in1: Union[StepOps, Tuple[StepOps, int]],
         in2: Union[StepOps, Tuple[StepOps, int]],
-        fn: MapFn,
+        fn: MapAccumFn,
         init_fn: InitFn,
         rank: int,
         write_back_mu: bool,
@@ -528,7 +623,7 @@ class BinaryMapAccum(StepOps):
             stream_dtype=self.fn.apply(
                 (in1_stream.stream_dtype, in2_stream.stream_dtype)
             ),
-            shape=self.in1.stream.shape[: -self.rank],
+            shape=in1_stream.shape[: -self.rank],
         )
 
         input_node1 = in1 if isinstance(in1, StepOps) else in1[0]
@@ -577,6 +672,32 @@ class BinaryMapAccum(StepOps):
             self.in2 = new_input
         else:
             raise ValueError("Wrong org_input")
+
+    def off_chip_traffic(self) -> sympy.Expr:
+        """Return the off-chip traffic for this operation."""
+        return sympy.Integer(0)
+
+    def on_chip_requirement(self, count_fifos: bool = False) -> sympy.Expr:
+        """Return the on-chip memory requirement for this operation."""
+        if not count_fifos:
+            # Get the size of the stream's data type
+            return self._stream.stream_dtype.size_in_bytes()
+
+        # Get the first input stream (all inputs should have the same datatype)
+        in_stream = get_stream(self.in1)
+
+        # Check that the input stream's datatype is a Tile
+        assert isinstance(
+            in_stream.stream_dtype, Tile
+        ), "Input stream must be a Tile type."
+
+        # Calculate the size of the input stream's datatype
+        in_tile_size = in_stream.stream_dtype.size_in_bytes()
+
+        # Return the size times (len(self._inputs) + 1) for FIFO requirements
+        return sympy.simplify(
+            sympy.Mul(in_tile_size, sympy.Integer(len(self.input_list) + 1))
+        )
 
 
 class Broadcast(StepOps):
@@ -638,10 +759,18 @@ class Broadcast(StepOps):
             raise ValueError("The shape of the input stream shouldn't change")
         self._input = new_input
 
+    def off_chip_traffic(self) -> sympy.Expr:
+        """Return the off-chip traffic for this operation."""
+        return sympy.Integer(0)
+
+    def on_chip_requirement(self, count_fifos: bool = False) -> sympy.Expr:
+        """Return the on-chip memory requirement for this operation."""
+        return sympy.Integer(0)
+
 
 class OffChipStore(StepOps):
     _input: Union[StepOps, Tuple[StepOps, int]]
-    tensor_shape_tiled: Tuple[int, ...]
+    tensor_shape_tiled: Tuple[Union[int, DynDim], ...]
     tile_row: int
     tile_col: int
     store_file_name: str  # This should not include the file extension!!
@@ -657,9 +786,11 @@ class OffChipStore(StepOps):
         super().__init__()
 
         self._input = input
-        self.tensor_shape_tiled = input.stream.shape[1:]
-        self.tile_row = input.stream.stream_dtype.shape[0]
-        self.tile_col = input.stream.stream_dtype.shape[1]
+        in_stream: Stream = get_stream(input)
+        self.tensor_shape_tiled = in_stream.shape[1:]
+        assert isinstance(in_stream.stream_dtype, Tile), "Tensor shape must be a tuple."
+        self.tile_row = in_stream.stream_dtype.shape[0]
+        self.tile_col = in_stream.stream_dtype.shape[1]
         self.store_file_name = store_file_name
         self.par_dispatch = par_dispatch
 
@@ -687,7 +818,7 @@ class OffChipStore(StepOps):
             "Shouldn't be called for nodes without an output stream"
         )
 
-    def get_untiled_shape(self) -> Tuple[int, ...]:
+    def get_untiled_shape(self) -> Tuple[Union[int, DynDim], ...]:
         """Get the un-tiled shape of the tensor."""
         if len(self.tensor_shape_tiled) == 1:
             return (self.tensor_shape_tiled[-1] * self.tile_row, self.tile_col)
@@ -710,19 +841,49 @@ class OffChipStore(StepOps):
             raise ValueError("The shape of the input stream shouldn't change")
         self._input = new_input
 
+    def off_chip_traffic(self) -> sympy.Expr:
+        """Return the off-chip traffic for this operation."""
+        # Get the input stream
+        input_stream = get_stream(self._input)
+
+        # Calculate the total number of elements in the input stream
+        total_elements = input_stream.total_elements()
+
+        assert not isinstance(
+            input_stream.stream_dtype, Buffer
+        ), "Input stream must be a Tile type."
+        # Multiply by the size of the data type
+        return sympy.simplify(
+            sympy.Mul(total_elements, input_stream.stream_dtype.size_in_bytes())
+        )
+
+    def on_chip_requirement(self, count_fifos: bool = False) -> sympy.Expr:
+        """Return the on-chip memory requirement for this operation."""
+        # Get the input stream
+        input_stream = get_stream(self._input)
+
+        # Return the size of the data type of the input stream
+        return input_stream.stream_dtype.size_in_bytes()
+
 
 class Bufferize(StepOps):
     _input: Union[StepOps, Tuple[StepOps, int]]
     rank: int
+    off_chip: bool
     _stream: Stream
 
     def __init__(
-        self, graph: MultiDiGraph, input: Union[StepOps, Tuple[StepOps, int]], rank: int
+        self,
+        graph: MultiDiGraph,
+        input: Union[StepOps, Tuple[StepOps, int]],
+        rank: int,
+        off_chip: bool = False,
     ):
         super().__init__()
 
         self._input = input
         self.rank = rank
+        self.off_chip = off_chip
 
         in_stream: Stream = get_stream(input)
         assert rank > 0, "Rank must be greater than 0."
@@ -774,11 +935,53 @@ class Bufferize(StepOps):
             raise ValueError("The shape of the input stream shouldn't change")
         self._input = new_input
 
+    def off_chip_traffic(self) -> sympy.Expr:
+        """Return the off-chip traffic for this operation."""
+        if not self.off_chip:
+            return sympy.Integer(0)
+
+        # Get the input stream
+        in_stream = get_stream(self._input)
+
+        # Check that the input stream's datatype is a Tile
+        assert isinstance(
+            in_stream.stream_dtype, Tile
+        ), "Input stream must be a Tile type."
+        tile_size = in_stream.stream_dtype.size_in_bytes()
+
+        # Calculate the total number of elements in the input stream
+        total_elements = in_stream.total_elements()
+
+        return sympy.simplify(sympy.Mul(total_elements, tile_size))
+
+    def on_chip_requirement(self, count_fifos: bool = False) -> sympy.Expr:
+        """Return the on-chip memory requirement for this operation."""
+        # Get the input stream
+        in_stream = get_stream(self._input)
+        assert isinstance(
+            in_stream.stream_dtype, Tile
+        ), "Input stream must be a Tile type."
+        tile_size = in_stream.stream_dtype.size_in_bytes()
+
+        if (
+            self.off_chip
+        ):  # If the buffer is off-chip, only the tile size is counted for the staging area
+            return tile_size
+
+        # Get the buffer stream
+        assert isinstance(
+            self._stream.stream_dtype, Buffer
+        ), "Stream must be a Buffer type."
+        buffer_size = self._stream.stream_dtype.size_in_bytes()
+
+        return sympy.simplify(sympy.Add(buffer_size, tile_size))
+
 
 class Streamify(StepOps):
     _input: Union[StepOps, Tuple[StepOps, int]]
     repeat_factor: List[int]
     rank: int
+    off_chip: bool
     _stream: Stream
 
     def __init__(
@@ -787,12 +990,14 @@ class Streamify(StepOps):
         input: Union[StepOps, Tuple[StepOps, int]],
         repeat_factor: List[int],
         rank: int,  # The rank of the Buffer
+        off_chip: bool = False,
     ):
         super().__init__()
 
         self._input = input
         self.repeat_factor = repeat_factor
         self.rank = rank
+        self.off_chip = off_chip
 
         in_stream: Stream = get_stream(input)
         assert rank > 0, "Rank must be greater than 0."
@@ -845,6 +1050,48 @@ class Streamify(StepOps):
             raise ValueError("The shape of the input stream shouldn't change")
         self._input = new_input
 
+    def off_chip_traffic(self) -> sympy.Expr:
+        """Return the off-chip traffic for this operation."""
+        if not self.off_chip:
+            return sympy.Integer(0)
+
+        # Get the input stream
+        in_stream = get_stream(self._input)
+        assert isinstance(
+            in_stream.stream_dtype, Buffer
+        ), "Input stream must be a Buffer type."
+        buffer_size = self._stream.stream_dtype.size_in_bytes()
+
+        # Calculate the total number of elements in the input stream
+        total_input_elements = in_stream.total_elements()
+
+        # Calculate the product of elements in repeat_factor
+        repeat_product = sympy.Mul(*self.repeat_factor)
+
+        return sympy.simplify(
+            sympy.Mul(total_input_elements, repeat_product, buffer_size)
+        )
+
+    def on_chip_requirement(self, count_fifos: bool = True) -> sympy.Expr:
+        """Return the on-chip memory requirement for this operation."""
+        # Get the size of the stream's data type
+        assert isinstance(
+            self._stream.stream_dtype, Tile
+        ), "Stream must be a Tile type."
+        tile_size = self._stream.stream_dtype.size_in_bytes()
+
+        if self.off_chip:
+            return tile_size
+
+        in_stream = get_stream(self._input)
+        assert isinstance(
+            in_stream.stream_dtype, Buffer
+        ), "Stream must be a Buffer type."
+        # Calculate the size of the buffer (self._stream's datatype)
+        buffer_size = in_stream.stream_dtype.size_in_bytes()
+
+        return sympy.simplify(sympy.Add(buffer_size, tile_size))
+
 
 class DynStreamify(StepOps):
     _input: Union[StepOps, Tuple[StepOps, int]]
@@ -852,6 +1099,7 @@ class DynStreamify(StepOps):
     repeat_rank: int
     bufferized_rank: int
     _stream: Stream
+    off_chip: bool
 
     # [Genghan] There is an ExpandRef hidden in the operation
     def __init__(
@@ -861,6 +1109,7 @@ class DynStreamify(StepOps):
         ref: Union[StepOps, Tuple[StepOps, int]],
         repeat_rank: int,  # Starting from this rank to rank 0, the input_stream should have 1s
         bufferized_rank: int,
+        off_chip: bool = False,
     ):
         super().__init__()
 
@@ -868,6 +1117,7 @@ class DynStreamify(StepOps):
         self.ref = ref
         self.repeat_rank = repeat_rank
         self.bufferized_rank = bufferized_rank
+        self.off_chip = off_chip
 
         in_stream: Stream = get_stream(input)
         ref_stream: Stream = get_stream(ref)
@@ -941,6 +1191,42 @@ class DynStreamify(StepOps):
         else:
             raise ValueError("Wrong org_input")
 
+    def off_chip_traffic(self) -> sympy.Expr:
+        """Return the off-chip traffic for this operation."""
+        if not self.off_chip:
+            return sympy.Integer(0)
+
+        # Get the ref stream
+        ref_stream = get_stream(self.ref)
+
+        # Calculate the product of elements in the ref stream's shape
+        ref_elements = ref_stream.total_elements()
+
+        # Get the size of the buffer (the data type of self._stream)
+        buffer_size = self._stream.stream_dtype.size_in_bytes()
+
+        return sympy.simplify(sympy.Mul(ref_elements, buffer_size))
+
+    def on_chip_requirement(self, count_fifos: bool = False) -> sympy.Expr:
+        """Return the on-chip memory requirement for this operation."""
+        # Get the size of the stream's data type
+        assert isinstance(
+            self._stream.stream_dtype, Tile
+        ), "Stream must be a Tile type."
+        tile_size = self._stream.stream_dtype.size_in_bytes()
+
+        if self.off_chip:
+            return tile_size
+
+        in_stream = get_stream(self._input)
+        assert isinstance(
+            in_stream.stream_dtype, Buffer
+        ), "Stream must be a Buffer type."
+        # Calculate the size of the buffer (self._stream's datatype)
+        buffer_size = in_stream.stream_dtype.size_in_bytes()
+
+        return sympy.simplify(sympy.Add(buffer_size, tile_size))
+
 
 class FlatPartition(StepOps):
     _input: Union[StepOps, Tuple[StepOps, int]]
@@ -977,11 +1263,13 @@ class FlatPartition(StepOps):
 
         in_stream: Stream = get_stream(input)
         # [Genghan] A trick: StepOps should use the same control_node to align the outermost dimension
-        new_names = sympy.symbols(f"{str(control_node)}_0:{num_consumers}")
+        new_names = sympy.symbols(
+            f"{str(control_node)}_0:{num_consumers}", integer=True, positive=True
+        )
         self._stream = [
             Stream(
                 stream_dtype=in_stream.stream_dtype,
-                shape=(new_names[i],)
+                shape=(DynDim(new_names[i]),)
                 + in_stream.shape[len(in_stream.shape) - partition_rank :],
             )
             for i in range(num_consumers)
@@ -1028,6 +1316,31 @@ class FlatPartition(StepOps):
         else:
             raise ValueError("Wrong org_input")
 
+    def off_chip_traffic(self) -> sympy.Expr:
+        """Return the off-chip traffic for this operation."""
+        return sympy.Integer(0)
+
+    def on_chip_requirement(self, count_fifos: bool = False) -> sympy.Expr:
+        """Return the on-chip memory requirement for this operation."""
+        if not count_fifos:
+            return sympy.Integer(0)
+
+        # Get the input stream
+        in_stream = get_stream(self._input)
+
+        # Check that the input stream's datatype is a Tile
+        assert isinstance(
+            in_stream.stream_dtype, Tile
+        ), "Input stream must be a Tile type."
+
+        # Calculate the size of the input stream's datatype
+        in_tile_size = in_stream.stream_dtype.size_in_bytes()
+
+        # Return the size times (num_consumers + 1) for FIFO requirements
+        return sympy.simplify(
+            sympy.Mul(in_tile_size, sympy.Integer(self.num_consumers + 1))
+        )
+
 
 class FlatReassemble(StepOps):
     _inputs: List[Union[StepOps, Tuple[StepOps, int]]]
@@ -1061,7 +1374,7 @@ class FlatReassemble(StepOps):
             for stream in in_streams
         ), "All input streams must have the same shape for the last 'reassemble_rank' dimensions."
         control_stream: Stream = get_stream(control)
-        new_name = sympy.Symbol(f"{str(self)}_dyn")
+        new_name = DynDim(f"{str(self)}_dyn")
         self._stream = Stream(
             stream_dtype=in_streams[0].stream_dtype,
             shape=control_stream.shape
@@ -1121,6 +1434,54 @@ class FlatReassemble(StepOps):
             self.control = new_input
         else:
             raise ValueError("Wrong org_input")
+
+    def off_chip_traffic(self) -> sympy.Expr:
+        """Return the off-chip traffic for this operation."""
+        return sympy.Integer(0)
+
+    def on_chip_requirement(self, count_fifos: bool = False) -> sympy.Expr:
+        """Return the on-chip memory requirement for this operation."""
+        if not count_fifos:
+            if self.write_back_mu:
+                reassembled_elements = sympy.Integer(1)
+                for dim in self._stream.shape[get_stream(self.control).rank - 1 :]:
+                    if isinstance(dim, DynDim):
+                        reassembled_elements *= dim.expr
+                    else:
+                        reassembled_elements *= dim
+                return reassembled_elements * self._stream.stream_dtype.size_in_bytes()
+            return sympy.Integer(0)
+
+        # Get the first input stream (all inputs should have the same datatype)
+        in_stream = get_stream(self._inputs[0])
+
+        # Check that the input stream's datatype is a Tile
+        assert isinstance(
+            in_stream.stream_dtype, Tile
+        ), "Input stream must be a Tile type."
+
+        # Calculate the size of the input stream's datatype
+        in_tile_size = in_stream.stream_dtype.size_in_bytes()
+
+        if self.write_back_mu:
+            reassembled_elements = sympy.Integer(1)
+            for dim in self._stream.shape[get_stream(self.control).rank - 1 :]:
+                if isinstance(dim, DynDim):
+                    reassembled_elements *= dim.expr
+                else:
+                    reassembled_elements *= dim
+            return sympy.simplify(
+                sympy.Add(
+                    sympy.Mul(in_tile_size, sympy.Integer(len(self._inputs) + 1)),
+                    reassembled_elements * self._stream.stream_dtype.size_in_bytes(),
+                )
+            )
+
+        # Return the size times (len(self._inputs) + 1) for FIFO requirements
+
+        return sympy.simplify(
+            sympy.Mul(in_tile_size, sympy.Integer(len(self._inputs) + 1))
+        )
 
 
 class UnaryMap(StepOps):
@@ -1190,10 +1551,35 @@ class UnaryMap(StepOps):
             raise ValueError("The shape of the input stream shouldn't change")
         self._input = new_input
 
+    def off_chip_traffic(self) -> sympy.Expr:
+        """Return the off-chip traffic for this operation."""
+        return sympy.Integer(0)
+
+    def on_chip_requirement(self, count_fifos: bool = False) -> sympy.Expr:
+        """Return the on-chip memory requirement for this operation."""
+        if not count_fifos:
+            return sympy.Integer(0)
+
+        # Get stream for input
+        in_stream = get_stream(self._input)
+
+        # Calculate tile sizes in bytes for each stream
+        assert not isinstance(
+            in_stream.stream_dtype, Buffer
+        ), "Input stream must be a Tile type."
+        assert not isinstance(
+            self._stream.stream_dtype, Buffer
+        ), "Input stream must be a Tile type."
+
+        in_tile_size = in_stream.stream_dtype.size_in_bytes()
+        output_tile_size = self._stream.stream_dtype.size_in_bytes()
+
+        return sympy.simplify(sympy.Add(in_tile_size, output_tile_size))
+
 
 class Accum(StepOps):
     _input: Union[StepOps, Tuple[StepOps, int]]
-    fn: MapFn
+    fn: AccumFn
     init_fn: InitFn
     accum_rank: int
     write_back_mu: bool
@@ -1205,7 +1591,7 @@ class Accum(StepOps):
         graph: MultiDiGraph,
         input: Union[StepOps, Tuple[StepOps, int]],
         output_stream_dtype: Union[Tile, Buffer, Select],
-        fn: MapFn,
+        fn: AccumFn,
         init_fn: InitFn,
         accum_rank: int,
         write_back_mu: bool,
@@ -1266,6 +1652,24 @@ class Accum(StepOps):
             raise ValueError("The shape of the input stream shouldn't change")
         self._input = new_input
 
+    def off_chip_traffic(self) -> sympy.Expr:
+        """Return the off-chip traffic for this operation."""
+        return sympy.Integer(0)
+
+    def on_chip_requirement(self, count_fifos: bool = False) -> sympy.Expr:
+        """Return the on-chip memory requirement for this operation."""
+        accumulator_size = self._stream.stream_dtype.size_in_bytes()
+
+        in_stream_dtype = get_stream(self._input).stream_dtype
+        assert not isinstance(
+            in_stream_dtype, Buffer
+        ), "Input stream must be a Tile type."
+        input_size = in_stream_dtype.size_in_bytes()
+        if not count_fifos:
+            return accumulator_size
+
+        return sympy.simplify(sympy.Add(accumulator_size, input_size))
+
 
 class Flatten(StepOps):
     _input: Union[StepOps, Tuple[StepOps, int]]
@@ -1296,7 +1700,9 @@ class Flatten(StepOps):
         input_node = input if isinstance(input, StepOps) else input[0]
         graph.add_edge(input_node, self)
 
-    def _compute_flattened_shape(self, shape, min_rank, max_rank):
+    def _compute_flattened_shape(
+        self, shape: Tuple[int | DynDim, ...], min_rank, max_rank
+    ):
         # Convert ranks to indices (rank 0 = rightmost = highest index)
         min_index = len(shape) - 1 - max_rank  # Note: max_rank gives min_index
         max_index = len(shape) - 1 - min_rank  # Note: min_rank gives max_index
@@ -1306,9 +1712,12 @@ class Flatten(StepOps):
             raise ValueError("Invalid rank range")
 
         # Calculate merged dimension
-        merged_dim = 1
+        merged_dim: Union[int, DynDim] = 1
         for i in range(min_index, max_index + 1):
-            merged_dim *= shape[i]
+            if isinstance(shape[i], DynDim):
+                merged_dim = shape[i] * merged_dim  # type: ignore
+            else:
+                merged_dim = merged_dim * shape[i]  # type: ignore
 
         # Build new shape
         new_shape = shape[:min_index] + (merged_dim,) + shape[max_index + 1 :]
@@ -1350,11 +1759,26 @@ class Flatten(StepOps):
             raise ValueError("The shape of the input stream shouldn't change")
         self._input = new_input
 
+    def off_chip_traffic(self) -> sympy.Expr:
+        """Return the off-chip traffic for this operation."""
+        return sympy.Integer(0)
+
+    def on_chip_requirement(self, count_fifos: bool = False) -> sympy.Expr:
+        """Return the on-chip memory requirement for this operation."""
+        if not count_fifos:
+            return sympy.Integer(0)
+
+        # Get the size of the stream's data type
+        stream_size = self._stream.stream_dtype.size_in_bytes()
+        return sympy.simplify(sympy.Mul(stream_size, sympy.Integer(2)))
+
 
 class Reshape(StepOps):
     _input: Union[StepOps, Tuple[StepOps, int]]
     chunk_size: int
     reshape_rank: int
+    pad_fn: Optional[InitFn]
+    write_back_mu: bool
     _stream: Stream
 
     def __init__(
@@ -1363,22 +1787,48 @@ class Reshape(StepOps):
         input: Union[StepOps, Tuple[StepOps, int]],
         chunk_size: int,
         reshape_rank: int,
+        write_back_mu: bool,
+        pad_fn: Optional[InitFn] = None,
     ):
         super().__init__()
         self._input = input
         self.chunk_size = chunk_size
         self.reshape_rank = reshape_rank
+        self.pad_fn = pad_fn
+        self.write_back_mu = write_back_mu
+
         in_stream: Stream = get_stream(input)
+        assert (
+            reshape_rank > 0 and in_stream.shape[reshape_rank] % chunk_size == 0
+        ) or (
+            pad_fn is not None and reshape_rank == 0
+        ), "The chunk size must be a divisor of the shape at the reshape rank if the rank being split is not the innermost"
+
         assert (
             reshape_rank >= 0 and reshape_rank <= in_stream.rank
         ), f"Reshape rank must be between 0 and {in_stream.rank}."
+
         rank_pos = in_stream.rank - reshape_rank
-        self._stream = Stream(
-            stream_dtype=in_stream.stream_dtype,
-            shape=in_stream.shape[:rank_pos]
-            + (ceiling(in_stream.shape[rank_pos] / chunk_size), chunk_size)
-            + in_stream.shape[(rank_pos + 1) :],
-        )
+        if isinstance(in_stream.shape[rank_pos], DynDim):
+            self._stream = Stream(
+                stream_dtype=in_stream.stream_dtype,
+                shape=in_stream.shape[:rank_pos]
+                + ((in_stream.shape[rank_pos] + chunk_size - 1) // chunk_size,)
+                + (chunk_size,)
+                + in_stream.shape[(rank_pos + 1) :],
+            )
+        elif isinstance(in_stream.shape[rank_pos], int):
+            self._stream = Stream(
+                stream_dtype=in_stream.stream_dtype,
+                shape=in_stream.shape[:rank_pos]
+                + ((in_stream.shape[rank_pos] + chunk_size - 1) // chunk_size,)
+                + (chunk_size,)
+                + in_stream.shape[(rank_pos + 1) :],
+            )
+        else:
+            raise ValueError(
+                f"Unsupported shape type at rank {rank_pos}: {in_stream.shape[rank_pos]} (type: {type(in_stream.shape[rank_pos])})"
+            )
 
         input_node = input if isinstance(input, StepOps) else input[0]
         graph.add_edge(input_node, self)
@@ -1418,10 +1868,24 @@ class Reshape(StepOps):
             raise ValueError("The shape of the input stream shouldn't change")
         self._input = new_input
 
+    def off_chip_traffic(self) -> sympy.Expr:
+        """Return the off-chip traffic for this operation."""
+        return sympy.Integer(0)
+
+    def on_chip_requirement(self, count_fifos: bool = False) -> sympy.Expr:
+        """Return the on-chip memory requirement for this operation."""
+        if not count_fifos:
+            return sympy.Integer(0)
+
+        # Get the size of the stream's data type
+        stream_size = self._stream.stream_dtype.size_in_bytes()
+        return sympy.simplify(sympy.Mul(stream_size, sympy.Integer(2)))
+
 
 class RetileStreamify(StepOps):
     _input: Union[StepOps, Tuple[StepOps, int]]
     split_row: bool
+    filter_mask: bool
     _stream: Stream
 
     def __init__(
@@ -1429,27 +1893,55 @@ class RetileStreamify(StepOps):
         graph: MultiDiGraph,
         input: Union[StepOps, Tuple[StepOps, int]],
         split_row: bool,
+        filter_mask: bool = False,
     ):
         super().__init__()
         self._input = input
         self.split_row = split_row
+        self.filter_mask = filter_mask
         in_stream: Stream = get_stream(input)
+
+        assert isinstance(
+            in_stream.stream_dtype, Tile
+        ), "Input stream must be a Tile type."
+
+        in_stream_tile: Tile = in_stream.stream_dtype
         if split_row:
-            output_stream_shape = in_stream.shape[:-1] + (
-                in_stream.shape[-1] * in_stream.stream_dtype.shape[0],
-            )
-            output_stream_dtype = Tile(
-                shape=(1, in_stream.stream_dtype.shape[1]),
-                tile_dtype=in_stream.stream_dtype.tile_dtype,
-            )
+            if filter_mask:
+                output_stream_shape = in_stream.shape[:-1] + (
+                    DynDim(f"{str(self)}_dyn"),
+                )
+                output_stream_dtype = Tile(
+                    shape=(1, in_stream_tile.shape[1]),
+                    tile_dtype=in_stream_tile.tile_dtype,
+                )
+
+            else:
+                output_stream_shape = in_stream.shape[:-1] + (
+                    in_stream.shape[-1] * in_stream_tile.shape[0],
+                )
+                output_stream_dtype = Tile(
+                    shape=(1, in_stream_tile.shape[1]),
+                    tile_dtype=in_stream_tile.tile_dtype,
+                )
+
         else:
-            output_stream_shape = in_stream.shape[:-1] + (
-                in_stream.shape[-1] * in_stream.stream_dtype.shape[1],
-            )
-            output_stream_dtype = Tile(
-                shape=(in_stream.stream_dtype.shape[0], 1),
-                tile_dtype=in_stream.stream_dtype.tile_dtype,
-            )
+            if filter_mask:
+                output_stream_shape = in_stream.shape[:-1] + (
+                    DynDim(f"{str(self)}_dyn"),
+                )
+                output_stream_dtype = Tile(
+                    shape=(in_stream.stream_dtype.shape[0], 1),
+                    tile_dtype=in_stream_tile.tile_dtype,
+                )
+            else:
+                output_stream_shape = in_stream.shape[:-1] + (
+                    in_stream.shape[-1] * in_stream_tile.shape[1],
+                )
+                output_stream_dtype = Tile(
+                    shape=(in_stream.stream_dtype.shape[0], 1),
+                    tile_dtype=in_stream_tile.tile_dtype,
+                )
 
         self._stream = Stream(
             stream_dtype=output_stream_dtype,
@@ -1492,3 +1984,11 @@ class RetileStreamify(StepOps):
         if get_stream(self.input) != get_stream(new_input):
             raise ValueError("The shape of the input stream shouldn't change")
         self._input = new_input
+
+    def off_chip_traffic(self) -> sympy.Expr:
+        """Return the off-chip traffic for this operation."""
+        return sympy.Integer(0)
+
+    def on_chip_requirement(self, count_fifos: bool = False) -> sympy.Expr:
+        """Return the on-chip memory requirement for this operation."""
+        return sympy.Integer(0)

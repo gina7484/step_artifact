@@ -22,6 +22,7 @@ def test_expert_selection_generation():
     select_gan = SelectGen(
         is_multihot=True,
         tensor=expert_selection_multi_hot,
+        n=E
     )
 
     printer_context = PrinterContext(step_graph, select_gan)

@@ -1,12 +1,17 @@
 from dataclasses import dataclass
-from typing import List, Tuple, Union
-from abc import ABC
+from typing import List, Optional, Tuple, Union
+from abc import ABC, abstractmethod
+
+import sympy
 
 from step_py.dyndim import DynDim
 
 
 class ElementTP(ABC):
-    pass
+    @abstractmethod
+    def size_in_bytes(self) -> sympy.Expr:
+        """Return the size of this element type in bytes."""
+        pass
 
 
 class Float16(ElementTP):
@@ -15,6 +20,13 @@ class Float16(ElementTP):
             return True
         return False
 
+    def size_in_bytes(self) -> sympy.Expr:
+        """Return the size of Float16 in bytes."""
+        return sympy.Integer(2)
+
+    def __str__(self) -> str:
+        return "Float16"
+
 
 class Float32(ElementTP):
     def __eq__(self, value):
@@ -22,33 +34,105 @@ class Float32(ElementTP):
             return True
         return False
 
+    def size_in_bytes(self) -> sympy.Expr:
+        """Return the size of Float32 in bytes."""
+        return sympy.Integer(4)
+
+    def __str__(self) -> str:
+        return "Float32"
+
+
+@dataclass
+class DynTile:
+    tile_dtype: ElementTP
+    shape: Tuple[Union[int, DynDim], Union[int, DynDim]]
+
+    def size_in_bytes(self) -> sympy.Expr:
+        """Return the total size of this tile in bytes."""
+        total_elements = sympy.Integer(1)
+        for dim in self.shape:
+            if isinstance(dim, DynDim):
+                total_elements = total_elements * dim.expr
+            else:
+                total_elements = total_elements * dim
+        return sympy.simplify(total_elements * self.tile_dtype.size_in_bytes())
+
+    def __str__(self) -> str:
+        return f"Tile({self.tile_dtype}, {self.shape})"
+
 
 @dataclass
 class Tile:
     tile_dtype: ElementTP
     shape: Tuple[int, int]
 
+    def size_in_bytes(self) -> sympy.Expr:
+        """Return the total size of this tile in bytes."""
+        tile_size = sympy.Integer(self.shape[0] * self.shape[1])
+        return sympy.simplify(tile_size * self.tile_dtype.size_in_bytes())
+
+    def __str__(self) -> str:
+        return f"Tile({self.tile_dtype}, {self.shape})"
+
 
 @dataclass
 class Buffer:
     buff_dtype: Tile
-    shape: Tuple[int, ...]
+    shape: Tuple[Union[int, DynDim], ...]
+
+    def __post_init__(self):
+        assert isinstance(
+            self.shape[0], (int, DynDim)
+        ), "First dimension of buffer shape must be int or DynDim"
+        # Check that only the first dimension can be DynDim, others must be int
+        if len(self.shape) > 1:
+            for i, dim in enumerate(self.shape[1:], 1):
+                if not isinstance(dim, int):
+                    raise ValueError(
+                        f"Buffer dimension {i} must be int, got {type(dim)}"
+                    )
 
     @property
     def rank(self) -> int:
         return len(self.shape)
 
+    def size_in_bytes(self) -> sympy.Expr:
+        """Return the total size of this buffer in bytes."""
+        total_elements = sympy.Integer(1)
+        for dim in self.shape:
+            if isinstance(dim, DynDim):
+                total_elements = total_elements * dim.expr
+            else:
+                total_elements = total_elements * dim
+        return sympy.simplify(total_elements * self.buff_dtype.size_in_bytes())
+
+    def __str__(self) -> str:
+        return f"Buffer({self.buff_dtype}, {self.shape})"
+
 
 class Select(ABC):
-    pass
+    @abstractmethod
+    def size_in_bytes(self) -> sympy.Expr:
+        """Return the size of this select type in bytes."""
+        pass
 
 
+@dataclass
 class MultiHot(Select):
-    pass
+    total_n: int
+
+    def size_in_bytes(self) -> sympy.Expr:
+        """Return the size of MultiHot in bytes."""
+        return sympy.Integer(self.total_n)
 
 
+@dataclass
 class Index(Select):
-    pass
+    active_n: int
+
+    def size_in_bytes(self) -> sympy.Expr:
+        """Return the size of Index in bytes."""
+        return sympy.Integer(2 * self.active_n)
 
 
 @dataclass
@@ -59,3 +143,13 @@ class Stream:
     @property
     def rank(self) -> int:
         return len(self.shape) - 1
+
+    def total_elements(self) -> sympy.Expr:
+        """Return the total number of elements in this stream."""
+        total_elements = sympy.Integer(1)
+        for dim in self.shape:
+            if isinstance(dim, DynDim):
+                total_elements = total_elements * dim.expr
+            else:
+                total_elements = total_elements * dim
+        return sympy.simplify(total_elements)
