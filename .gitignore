@@ -11,3 +11,4 @@ target/
 .pytest_cache/
 *.txt
 *.csv
+*.zip

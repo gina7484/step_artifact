@@ -35,13 +35,16 @@ def simulate(
 
     serialize(graph, protobuf_file)
 
-    result, cycles = step_perf.run_graph(  # pylint: disable=no-member
-        protobuf_file, logging, hbm_config, sim_config, db_name
+    result, cycles, duration_ms, duration_s = (
+        step_perf.run_graph(  # pylint: disable=no-member
+            protobuf_file, logging, hbm_config, sim_config, db_name
+        )
     )
     print(f"Result: {result}")
     print(f"Cycles: {cycles}")
+    print(f"Duration: {duration_ms} ms, {duration_s} s")
 
-    return cycles
+    return cycles, duration_ms, duration_s
 
 
 # pylint: disable=no-member

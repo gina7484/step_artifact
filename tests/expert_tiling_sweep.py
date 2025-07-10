@@ -107,6 +107,8 @@ class ResultMetrics:
     on_chip_requirement: int = 0
     off_chip_traffic: int = 0
     channel_depth: int = 0
+    duration_ms: int = 0
+    duration_s: int = 0
 
 
 def create_gate_up_down_ops(
@@ -398,108 +400,108 @@ def test_expert_tiling_sweep():
         save_graph_format(step_graph, OUTPUT_FILENAME, ["svg", "png"])
 
         # ------------ Access-Reuse Analysis ------------
-        total_off_chip_traffic = sympy.Integer(0)
-        total_on_chip_requirement = sympy.Integer(0)
+    #     total_off_chip_traffic = sympy.Integer(0)
+    #     total_on_chip_requirement = sympy.Integer(0)
 
-        for node_tuple in step_graph.nodes(data=True):
-            node, data = node_tuple
-            if isinstance(node, StepOps):
-                total_off_chip_traffic = sympy.Add(
-                    total_off_chip_traffic, node.off_chip_traffic()
-                )
-                total_on_chip_requirement = sympy.Add(
-                    total_on_chip_requirement, node.on_chip_requirement()
-                )
-            else:
-                raise ValueError(f"Node {node} in the graph is not a StepOps")
+    #     for node_tuple in step_graph.nodes(data=True):
+    #         node, data = node_tuple
+    #         if isinstance(node, StepOps):
+    #             total_off_chip_traffic = sympy.Add(
+    #                 total_off_chip_traffic, node.off_chip_traffic()
+    #             )
+    #             total_on_chip_requirement = sympy.Add(
+    #                 total_on_chip_requirement, node.on_chip_requirement()
+    #             )
+    #         else:
+    #             raise ValueError(f"Node {node} in the graph is not a StepOps")
 
-        print(f"Total on-chip requirement (bytes): {total_on_chip_requirement}")
-        print(f"Total off-chip traffic (bytes): {total_off_chip_traffic}")
+    #     print(f"Total on-chip requirement (bytes): {total_on_chip_requirement}")
+    #     print(f"Total off-chip traffic (bytes): {total_off_chip_traffic}")
 
-        result_metrics.on_chip_requirement = int(total_on_chip_requirement)  # bytes
-        result_metrics.off_chip_traffic = int(total_off_chip_traffic)  # bytes
-        result_metrics.operational_intensity = (
-            result_metrics.flops / result_metrics.off_chip_traffic
-        )  # flops/byte
+    #     result_metrics.on_chip_requirement = int(total_on_chip_requirement)  # bytes
+    #     result_metrics.off_chip_traffic = int(total_off_chip_traffic)  # bytes
+    #     result_metrics.operational_intensity = (
+    #         result_metrics.flops / result_metrics.off_chip_traffic
+    #     )  # flops/byte
 
-        # ------------ Simulate ------------
-        cycles = None
-        if simulate_mode == "functional":
-            n_channel = 8
-            channel_depth = 1
-            hbm_config = HBMConfig(64, n_channel, 2, 2, 1, 14)
-            sim_config = SimConfig(channel_depth=channel_depth)
+    #     # ------------ Simulate ------------
+    #     cycles = None
+    #     if simulate_mode == "functional":
+    #         n_channel = 8
+    #         channel_depth = 1
+    #         hbm_config = HBMConfig(64, n_channel, 2, 2, 1, 14)
+    #         sim_config = SimConfig(channel_depth=channel_depth)
 
-            result_metrics.mem_bw = n_channel * 32  # 32 bytes/cycle per channel
-            result_metrics.channel_depth = channel_depth
-            result_metrics.ridge_point = (
-                sum(
-                    [
-                        result_metrics.gate_up_compute_bw,
-                        result_metrics.act_fn_compute_bw,
-                        result_metrics.mult_compute_bw,
-                        result_metrics.down_compute_bw,
-                    ]
-                )  # FLOPs/cycle
-                / result_metrics.mem_bw  # bytes/cycle
-            )  # FLOPs/byte
+    #         result_metrics.mem_bw = n_channel * 32  # 32 bytes/cycle per channel
+    #         result_metrics.channel_depth = channel_depth
+    #         result_metrics.ridge_point = (
+    #             sum(
+    #                 [
+    #                     result_metrics.gate_up_compute_bw,
+    #                     result_metrics.act_fn_compute_bw,
+    #                     result_metrics.mult_compute_bw,
+    #                     result_metrics.down_compute_bw,
+    #                 ]
+    #             )  # FLOPs/cycle
+    #             / result_metrics.mem_bw  # bytes/cycle
+    #         )  # FLOPs/byte
 
-            if logging is None:
-                cycles = simulate(
-                    step_graph,
-                    False,  # logging
-                    hbm_config,
-                    sim_config,
-                    "/home/ginasohn/step_tl/graph.pb",
-                )
-            else:
-                assert isinstance(logging, str), "Logging must be a string path"
-                cycles = simulate(
-                    step_graph,
-                    True,  # logging
-                    hbm_config,
-                    sim_config,
-                    "/home/ginasohn/step_tl/graph.pb",
-                    logging,
-                )
+    #         if logging is None:
+    #             cycles, _, _ = simulate(
+    #                 step_graph,
+    #                 False,  # logging
+    #                 hbm_config,
+    #                 sim_config,
+    #                 "/home/ginasohn/step_tl/graph.pb",
+    #             )
+    #         else:
+    #             assert isinstance(logging, str), "Logging must be a string path"
+    #             cycles, _, _ = simulate(
+    #                 step_graph,
+    #                 True,  # logging
+    #                 hbm_config,
+    #                 sim_config,
+    #                 "/home/ginasohn/step_tl/graph.pb",
+    #                 logging,
+    #             )
 
-            result_metrics.cycles = cycles
+    #         result_metrics.cycles = cycles
 
-        elif simulate_mode == "timing":
-            pass
+    #     elif simulate_mode == "timing":
+    #         pass
 
-        # ------------ Gold Calculation & Verification ------------
+    #     # ------------ Gold Calculation & Verification ------------
 
-        if check_gold:
-            down = gold_calc(
-                input=input_tensor,
-                w_gate=linear_gate_list[0],
-                w_up=linear_up_list[0],
-                w_down=linear_down_list[0],
-            )
-            print(f"Down: {output.get_untiled_shape()}")
-            check_gold_tensor(output.store_file_name, down)
+    #     if check_gold:
+    #         down = gold_calc(
+    #             input=input_tensor,
+    #             w_gate=linear_gate_list[0],
+    #             w_up=linear_up_list[0],
+    #             w_down=linear_down_list[0],
+    #         )
+    #         print(f"Down: {output.get_untiled_shape()}")
+    #         check_gold_tensor(output.store_file_name, down)
 
-        result_metrics_list.append(result_metrics)
+    #     result_metrics_list.append(result_metrics)
 
-    # ------------ Save to CSV ------------
-    if csv_filename is not None:
-        field_names = [field.name for field in fields(ResultMetrics)]
+    # # ------------ Save to CSV ------------
+    # if csv_filename is not None:
+    #     field_names = [field.name for field in fields(ResultMetrics)]
 
-        with open(csv_filename, "w", newline="", encoding="utf-8") as csvfile:
-            writer = csv.DictWriter(csvfile, fieldnames=field_names)
+    #     with open(csv_filename, "w", newline="", encoding="utf-8") as csvfile:
+    #         writer = csv.DictWriter(csvfile, fieldnames=field_names)
 
-            # Write header
-            writer.writeheader()
+    #         # Write header
+    #         writer.writeheader()
 
-            # Write data rows
-            for metrics in result_metrics_list:
-                # Convert dataclass instance to dictionary
-                row_data = {
-                    field.name: getattr(metrics, field.name)
-                    for field in fields(metrics)
-                }
-                writer.writerow(row_data)
+    #         # Write data rows
+    #         for metrics in result_metrics_list:
+    #             # Convert dataclass instance to dictionary
+    #             row_data = {
+    #                 field.name: getattr(metrics, field.name)
+    #                 for field in fields(metrics)
+    #             }
+    #             writer.writerow(row_data)
 
 
 def test_expert_tiling_sweep_single_schedule():
@@ -530,12 +532,12 @@ def test_expert_tiling_sweep_single_schedule():
 
     check_gold = True
 
-    logging = None
+    logging = False
 
     par_dispatch = 4
 
     tiling_schedule_name = "mn_mk"
-    csv_filename = f"expert_tiling_sweep_{tiling_schedule_name}.csv"
+    csv_filename = f"expert_tiling_sweep_{tiling_schedule_name}_duration.csv"
 
     # ------------ Model Configuration ------------
     model_config = SimpleExample()
@@ -703,37 +705,37 @@ def test_expert_tiling_sweep_single_schedule():
         step_graph = infer_broadcast(step_graph)
 
         # ------------ Print Graph ------------
-        OUTPUT_FILENAME = (
-            f"expert_{tiling_schedule_name}_{tile_m}_{tile_k}_{tile_n}_{tile_n_down}"
-        )
-        save_graph_format(step_graph, OUTPUT_FILENAME, ["svg", "png"])
+        # OUTPUT_FILENAME = (
+        #     f"expert_{tiling_schedule_name}_{tile_m}_{tile_k}_{tile_n}_{tile_n_down}"
+        # )
+        # save_graph_format(step_graph, OUTPUT_FILENAME, ["svg", "png"])
 
         # ------------ Access-Reuse Analysis ------------
-        total_off_chip_traffic = sympy.Integer(0)
-        total_on_chip_requirement = sympy.Integer(0)
+        #     total_off_chip_traffic = sympy.Integer(0)
+        #     total_on_chip_requirement = sympy.Integer(0)
 
-        for node_tuple in step_graph.nodes(data=True):
-            node, data = node_tuple
-            if isinstance(node, StepOps):
-                total_off_chip_traffic = sympy.Add(
-                    total_off_chip_traffic, node.off_chip_traffic()
-                )
-                total_on_chip_requirement = sympy.Add(
-                    total_on_chip_requirement, node.on_chip_requirement()
-                )
-            else:
-                raise ValueError(f"Node {node} in the graph is not a StepOps")
+        #     for node_tuple in step_graph.nodes(data=True):
+        #         node, data = node_tuple
+        #         if isinstance(node, StepOps):
+        #             total_off_chip_traffic = sympy.Add(
+        #                 total_off_chip_traffic, node.off_chip_traffic()
+        #             )
+        #             total_on_chip_requirement = sympy.Add(
+        #                 total_on_chip_requirement, node.on_chip_requirement()
+        #             )
+        #         else:
+        #             raise ValueError(f"Node {node} in the graph is not a StepOps")
 
-        print(f"Total on-chip requirement (bytes): {total_on_chip_requirement}")
-        print(f"Total off-chip traffic (bytes): {total_off_chip_traffic}")
+        #     print(f"Total on-chip requirement (bytes): {total_on_chip_requirement}")
+        #     print(f"Total off-chip traffic (bytes): {total_off_chip_traffic}")
 
-        result_metrics.on_chip_requirement = int(total_on_chip_requirement)  # bytes
-        result_metrics.off_chip_traffic = int(total_off_chip_traffic)  # bytes
-        result_metrics.operational_intensity = (
-            result_metrics.flops / result_metrics.off_chip_traffic
-        )  # flops/byte
+        #     result_metrics.on_chip_requirement = int(total_on_chip_requirement)  # bytes
+        #     result_metrics.off_chip_traffic = int(total_off_chip_traffic)  # bytes
+        #     result_metrics.operational_intensity = (
+        #         result_metrics.flops / result_metrics.off_chip_traffic
+        #     )  # flops/byte
 
-        # ------------ Simulate ------------
+        #     # ------------ Simulate ------------
         cycles = None
         if simulate_mode == "functional":
             n_channel = 8
@@ -755,8 +757,8 @@ def test_expert_tiling_sweep_single_schedule():
                 / result_metrics.mem_bw  # bytes/cycle
             )  # FLOPs/byte
 
-            if logging is None:
-                cycles = simulate(
+            if not logging:
+                cycles, duration_ms, duration_s = simulate(
                     step_graph,
                     False,  # logging
                     hbm_config,
@@ -764,36 +766,37 @@ def test_expert_tiling_sweep_single_schedule():
                     "/home/ginasohn/step_tl/graph.pb",
                 )
             else:
-                assert isinstance(logging, str), "Logging must be a string path"
-                cycles = simulate(
+                cycles, duration_ms, duration_s = simulate(
                     step_graph,
                     True,  # logging
                     hbm_config,
                     sim_config,
                     "/home/ginasohn/step_tl/graph.pb",
-                    logging,
+                    f"expert_{tiling_schedule_name}_{tile_m}_{tile_k}_{tile_n}_{tile_n_down}",
                 )
 
             result_metrics.cycles = cycles
+            result_metrics.duration_ms = duration_ms
+            result_metrics.duration_s = duration_s
 
         elif simulate_mode == "timing":
             pass
 
-        # ------------ Gold Calculation & Verification ------------
+        #     # ------------ Gold Calculation & Verification ------------
 
-        if check_gold:
-            down = gold_calc(
-                input=input_tensor,
-                w_gate=linear_gate_list[0],
-                w_up=linear_up_list[0],
-                w_down=linear_down_list[0],
-            )
-            print(f"Down: {output.get_untiled_shape()}")
-            check_gold_tensor(output.store_file_name, down)
+        #     if check_gold:
+        #         down = gold_calc(
+        #             input=input_tensor,
+        #             w_gate=linear_gate_list[0],
+        #             w_up=linear_up_list[0],
+        #             w_down=linear_down_list[0],
+        #         )
+        #         print(f"Down: {output.get_untiled_shape()}")
+        #         check_gold_tensor(output.store_file_name, down)
 
         result_metrics_list.append(result_metrics)
 
-    # ------------ Save to CSV ------------
+    # # ------------ Save to CSV ------------
     if csv_filename is not None:
         field_names = [field.name for field in fields(ResultMetrics)]
 

@@ -70,6 +70,7 @@ def test_0d_partition_onehot():
         step_graph,
         False,  # logging
         HBMConfig(64, 8, 2, 2, 1, 14),
+        SimConfig(channel_depth=14),
         "/home/ginasohn/step_tl/graph.pb",
     )
 
@@ -135,6 +136,7 @@ def test_0d_partition_multihot():
         step_graph,
         False,  # logging
         HBMConfig(64, 8, 2, 2, 1, 14),
+        SimConfig(channel_depth=14),
         "/home/ginasohn/step_tl/graph.pb",
     )
 
@@ -316,5 +318,6 @@ def test_0d_partition_onehot_dyn_load_reassemble():
         step_graph,
         False,  # logging
         HBMConfig(64, 8, 2, 2, 1, 14),
+        SimConfig(channel_depth=14),
         "/home/ginasohn/step_tl/graph.pb",
     )

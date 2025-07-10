@@ -428,7 +428,7 @@ class Promote(StepOps):
 
     def __str__(self):
         cls = self.__class__.__name__
-        return f"{cls}_{self.instance_id}"
+        return f"{cls}_{self.instance_id}({self.promote_rank} D)"
 
     def replace_input(
         self,
@@ -525,7 +525,7 @@ class BinaryMap(StepOps):
 
     def __str__(self):
         cls = self.__class__.__name__
-        return f"{cls}_{self.instance_id}"
+        return f"{cls}_{self.instance_id} (fn: {self.fn})"
 
     def replace_input(
         self,
@@ -655,7 +655,7 @@ class BinaryMapAccum(StepOps):
 
     def __str__(self):
         cls = self.__class__.__name__
-        return f"{cls}_{self.instance_id}"
+        return f"{cls}_{self.instance_id} (fn: {self.fn})"
 
     def replace_input(
         self,
@@ -924,7 +924,7 @@ class Bufferize(StepOps):
 
     def __str__(self):
         cls = self.__class__.__name__
-        return f"{cls}_{self.instance_id}"
+        return f"{cls}_{self.instance_id}({self.rank} D)"
 
     def replace_input(
         self,
@@ -1039,7 +1039,7 @@ class Streamify(StepOps):
 
     def __str__(self):
         cls = self.__class__.__name__
-        return f"{cls}_{self.instance_id}"
+        return f"{cls}_{self.instance_id} ({self.rank} D)"
 
     def replace_input(
         self,
@@ -1298,7 +1298,7 @@ class FlatPartition(StepOps):
 
     def __str__(self):
         cls = self.__class__.__name__
-        return f"{cls}_{self.instance_id}"
+        return f"{cls}_{self.instance_id} ({self.partition_rank} D)"
 
     def replace_input(
         self,
@@ -1414,7 +1414,7 @@ class FlatReassemble(StepOps):
 
     def __str__(self):
         cls = self.__class__.__name__
-        return f"{cls}_{self.instance_id}"
+        return f"{cls}_{self.instance_id} ({self.reassemble_rank} D)"
 
     def replace_input(
         self,
@@ -1540,7 +1540,7 @@ class UnaryMap(StepOps):
 
     def __str__(self):
         cls = self.__class__.__name__
-        return f"{cls}_{self.instance_id}"
+        return f"{cls}_{self.instance_id} (fn: {self.fn})"
 
     def replace_input(
         self,
@@ -1641,7 +1641,7 @@ class Accum(StepOps):
 
     def __str__(self):
         cls = self.__class__.__name__
-        return f"{cls}_{self.instance_id}"
+        return f"{cls}_{self.instance_id} ({self.accum_rank} D) (fn: {self.fn})"
 
     def replace_input(
         self,
@@ -1748,7 +1748,7 @@ class Flatten(StepOps):
 
     def __str__(self):
         cls = self.__class__.__name__
-        return f"{cls}_{self.instance_id}"
+        return f"{cls}_{self.instance_id} ({self.min_rank} D, {self.max_rank} D)"
 
     def replace_input(
         self,
@@ -1857,7 +1857,7 @@ class Reshape(StepOps):
 
     def __str__(self):
         cls = self.__class__.__name__
-        return f"{cls}_{self.instance_id}"
+        return f"{cls}_{self.instance_id} ({self.reshape_rank} D) (chunk: {self.chunk_size})"
 
     def replace_input(
         self,

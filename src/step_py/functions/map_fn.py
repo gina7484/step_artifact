@@ -16,6 +16,9 @@ class MapFn(ABC):
     def apply(self, input_tp: Tuple) -> Tile:
         pass
 
+    def __str__(self) -> str:
+        return self.__class__.__name__
+
 
 class Matmul(MapFn):
     """
