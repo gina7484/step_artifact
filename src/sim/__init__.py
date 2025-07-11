@@ -535,6 +535,27 @@ def serialize(graph: MultiDiGraph, protobuf_file: str):
             )
 
             operator.flat_reassemble.CopyFrom(flatreassemble_pb)
+        elif isinstance(op, EagerMerge):
+            eagermerge_pb = ops_pb2.EagerMerge()
+
+            input_id_list = []
+            stream_idx_list = []
+            for input_stream in op._inputs:
+                if isinstance(input_stream, Tuple):
+                    input_node, idx = input_stream
+                    input_id_list.append(input_node.instance_id)
+                    stream_idx_list.append(idx)
+                else:
+                    input_id_list.append(input_stream.instance_id)
+                    stream_idx_list.append(-1)
+
+            eagermerge_pb.input_id_list.extend(input_id_list)
+            eagermerge_pb.input_stream_idx_list.extend(stream_idx_list)
+
+            eagermerge_pb.input_rank = op.input_rank
+            eagermerge_pb.dtype.CopyFrom(to_pb_datatype(op.stream_idx(0).stream_dtype))
+
+            operator.eager_merge.CopyFrom(eagermerge_pb)
         elif isinstance(op, Promote):
             promote_pb = ops_pb2.Promote()
 

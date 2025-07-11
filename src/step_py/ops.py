@@ -7,7 +7,7 @@ from step_py.functions.accum_fn import AccumFn
 from step_py.functions.init_fn import InitFn
 from step_py.functions.map_accum_fn import MapAccumFn
 from step_py.functions.map_fn import MapFn
-from step_py.datatype import Buffer, Stream, Tile, Select, Float16, Float32
+from step_py.datatype import Buffer, MultiHot, Stream, Tile, Select, Float16, Float32
 from networkx import MultiDiGraph
 import sympy
 
@@ -1339,6 +1339,126 @@ class FlatPartition(StepOps):
         # Return the size times (num_consumers + 1) for FIFO requirements
         return sympy.simplify(
             sympy.Mul(in_tile_size, sympy.Integer(self.num_consumers + 1))
+        )
+
+
+class EagerMerge(StepOps):
+    _inputs: List[Union[StepOps, Tuple[StepOps, int]]]
+    input_rank: int  # this is the merge (reassemble) rank too
+    _stream: List[Stream]
+
+    def __init__(
+        self,
+        graph: MultiDiGraph,
+        inputs: List[Union[StepOps, Tuple[StepOps, int]]],
+        input_rank: int,  # Remove dimensions at rank larger or equal to this value
+    ):
+        super().__init__()
+
+        self._inputs = inputs
+        self.input_rank = input_rank
+
+        in_streams: List[Stream] = [get_stream(input) for input in inputs]
+        assert all(
+            stream.shape[1:] == in_streams[0].shape[1:] for stream in in_streams
+        ), "All input streams must have the same shape except the outermost dimensions."
+
+        # True if any input streams has a dynamic outermost dimension
+        has_dyndim_input = any(
+            isinstance(stream.shape[0], DynDim) for stream in in_streams
+        )
+        merged_dim = DynDim(sympy.Integer(0)) if has_dyndim_input else 0
+        merged_dim = sum([stream.shape[0] for stream in in_streams], start=merged_dim)
+
+        data_stream = Stream(
+            stream_dtype=in_streams[0].stream_dtype,
+            shape=(merged_dim,) + in_streams[0].shape[1:],
+        )
+        sel_stream = Stream(
+            stream_dtype=MultiHot(total_n=len(in_streams)),
+            shape=(merged_dim,),
+        )
+        self._stream = [data_stream, sel_stream]
+
+        for input_node in inputs:
+            node = input_node if isinstance(input_node, StepOps) else input_node[0]
+            graph.add_edge(node, self)
+
+    @property
+    def stream(self) -> Stream:
+        raise NotImplementedError(
+            "This property shouldn't be used for nodes with multiple output streams"
+        )
+
+    @property
+    def stream_list(self) -> List[Stream]:
+        return self._stream
+
+    @property
+    def input(self) -> Union["StepOps", Tuple["StepOps", int]]:
+        raise NotImplementedError(
+            "Shouldn't be called for nodes that has multiple input streams"
+        )
+
+    @property
+    def input_list(self) -> List[Union["StepOps", Tuple["StepOps", int]]]:
+        return self._inputs
+
+    def stream_idx(self, idx: int) -> Stream:
+        """
+        idx:
+        0: data stream
+        1: select stream
+        """
+        assert idx in [0, 1], "Invalid stream index"
+        return self._stream[idx]
+
+    def __str__(self):
+        cls = self.__class__.__name__
+        return f"{cls}_{self.instance_id} ({self.input_rank} D)"
+
+    def replace_input(
+        self,
+        org_input: Union["StepOps", Tuple["StepOps", int]],
+        new_input: Union["StepOps", Tuple["StepOps", int]],
+    ):
+        for i, input_node in enumerate(self._inputs):
+            if input_node == org_input:
+                if get_stream(input_node) != get_stream(new_input):
+                    raise ValueError("The shape of the input stream shouldn't change")
+                self._inputs[i] = new_input
+                return
+
+    def off_chip_traffic(self) -> sympy.Expr:
+        """Return the off-chip traffic for this operation."""
+        return sympy.Integer(0)
+
+    def on_chip_requirement(self, count_fifos: bool = False) -> sympy.Expr:
+        """Return the on-chip memory requirement for this operation."""
+        if not count_fifos:
+            return sympy.Integer(0)
+
+        # Get the first input stream (all inputs should have the same datatype)
+        in_stream = get_stream(self._inputs[0])
+
+        sel_stream_out: Stream = self.stream_idx(1)
+
+        # Check that the input stream's datatype is a Tile
+        assert isinstance(
+            in_stream.stream_dtype, Tile
+        ), "Input stream must be a Tile type."
+
+        # Calculate the size of the input stream's datatype
+        in_tile_size = in_stream.stream_dtype.size_in_bytes()
+        sel_stream_out_size = sel_stream_out.stream_dtype.size_in_bytes()
+
+        # Return the size times (len(self._inputs) + 1) for FIFO requirements
+
+        return sympy.simplify(
+            sympy.Mul(
+                sympy.Add(in_tile_size, sel_stream_out_size),
+                sympy.Integer(len(self._inputs) + 1),
+            )
         )
 
 
