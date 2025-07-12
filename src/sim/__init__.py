@@ -202,7 +202,8 @@ def serialize(graph: MultiDiGraph, protobuf_file: str, functional: bool):
             offchipstore_pb.tensor_shape_tiled.extend(list(op.tensor_shape_tiled))
             offchipstore_pb.tile_row = op.tile_row
             offchipstore_pb.tile_col = op.tile_col
-            offchipstore_pb.store_path = op.store_file_name
+            if functional:
+                offchipstore_pb.store_path = op.store_file_name
             offchipstore_pb.par_dispatch = op.par_dispatch
 
             operator.off_chip_store.CopyFrom(offchipstore_pb)
@@ -218,10 +219,9 @@ def serialize(graph: MultiDiGraph, protobuf_file: str, functional: bool):
 
             offchipload_pb.dtype.CopyFrom(to_pb_datatype(op.stream.stream_dtype))
 
-            file_path = f"{str(op)}.npy"
-            offchipload_pb.npy_path = file_path
-
             if functional:
+                file_path = f"{str(op)}.npy"
+                offchipload_pb.npy_path = file_path
                 np.save(file_path, op.underlying.detach().numpy())
                 print(f"Saved {str(op)} data to {file_path}")
 
@@ -253,11 +253,11 @@ def serialize(graph: MultiDiGraph, protobuf_file: str, functional: bool):
 
             dyn_offchipload_pb.dtype.CopyFrom(to_pb_datatype(op.stream.stream_dtype))
 
-            file_path = f"{str(op)}.npy"
             if functional:
+                file_path = f"{str(op)}.npy"
+                dyn_offchipload_pb.npy_path = file_path
                 np.save(file_path, op.underlying.detach().numpy())
                 print(f"Saved {str(op)} data to {file_path}")
-            dyn_offchipload_pb.npy_path = file_path
 
             operator.dyn_off_chip_load.CopyFrom(dyn_offchipload_pb)
         elif isinstance(op, BinaryMap):
@@ -634,9 +634,8 @@ def serialize(graph: MultiDiGraph, protobuf_file: str, functional: bool):
 
             file_path = f"{str(op)}.npy"
             selectgen_pb.npy_path = file_path
-            if functional:
-                np.save(file_path, op.underlying.detach().numpy())
-                print(f"Saved {str(op)} data to {file_path}")
+            np.save(file_path, op.underlying.detach().numpy())
+            print(f"Saved {str(op)} data to {file_path}")
 
             operator.select_gen.CopyFrom(selectgen_pb)
         elif isinstance(op, PrinterContext):

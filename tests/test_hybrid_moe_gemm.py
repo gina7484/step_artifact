@@ -691,8 +691,8 @@ class SmallerDeepSeekV3:
 class SmallerMixtral:  # 32x scaled down version for each dimension
     n_routed_experts = 8
     n_activated_experts = 2
-    dim = 64  # 4096/64
-    moe_inter_dim = 224  # 14336/64 (Can use tile size upto 32)
+    dim = 128  # 4096/32
+    moe_inter_dim = 448  # 14336/32 (Can use tile size upto 64)
 
 
 @dataclass
@@ -765,11 +765,11 @@ def get_expert_selection(
 
 def run_hybrid_moe_gemm(tile_N: int, tile_F: int, group_size: int):
     # ------------ Sim Conig ------------
-    simulate_rust = "full"  # either "full", "timing", "none"
-    gold_check = True
+    simulate_rust = "timing"  # either "full", "timing", "none"
+    gold_check = False
 
     # ------------ Model Configuration ------------
-    model_config = SmallerMixtral()
+    model_config = DeepSeekV316B()
 
     # ------------ Batch Size ------------
     B = 64
@@ -868,7 +868,7 @@ def run_hybrid_moe_gemm(tile_N: int, tile_F: int, group_size: int):
         tile_F=tile_F,
         tile_N=tile_N,
         group_size=GROUP_SIZE,
-        save_graph=True,
+        save_graph=False,
         simulate_rust=simulate_rust,
         # logging="expert_par_gemm_reshape",
     )
