@@ -34,7 +34,7 @@ def infer_broadcast(graph: nx.MultiDiGraph) -> nx.MultiDiGraph:
 
     for node, dst_node_list in broadcast_nodes.items():
 
-        if isinstance(node, FlatPartition):
+        if isinstance(node, (FlatPartition, EagerMerge)):
             if node.num_consumers < len(dst_node_list):
                 # This means there is broadcast happening in some of the output streams
                 # [TODO] Fix this for BinaryMap and DynStreamify
@@ -52,7 +52,7 @@ def infer_broadcast(graph: nx.MultiDiGraph) -> nx.MultiDiGraph:
                 for idx, dst_node_list_i in enumerate(regrouped_dst_node_list):
 
                     if len(dst_node_list_i) > 1:
-                        src_node = (node, idx)
+                        src_node = (node, idx)  # type: ignore (Cannot infer Union[EagerMerge, FlatPartition] is a subclass of StepOps)
                         broadcast = Broadcast(
                             graph=graph,
                             input=src_node,

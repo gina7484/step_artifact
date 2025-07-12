@@ -1345,6 +1345,7 @@ class FlatPartition(StepOps):
 class EagerMerge(StepOps):
     _inputs: List[Union[StepOps, Tuple[StepOps, int]]]
     input_rank: int  # this is the merge (reassemble) rank too
+    num_consumers: int
     _stream: List[Stream]
 
     def __init__(
@@ -1357,6 +1358,7 @@ class EagerMerge(StepOps):
 
         self._inputs = inputs
         self.input_rank = input_rank
+        self.num_consumers = 2
 
         in_streams: List[Stream] = [get_stream(input) for input in inputs]
         assert all(

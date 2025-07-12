@@ -12,6 +12,8 @@ def save_graph_format(
     format: List[str],
     subgraph_nodes: Optional[List] = None,  # nodes to highlight as a subgraph
 ):
+    print(f"Visualizing the STEP GRAPH...")
+
     agraph: AGraph = to_agraph(digraph)
 
     class_color_map = {
@@ -56,9 +58,22 @@ def save_graph_format(
                     str(node_id),
                     "-------------",
                     "output stream shape:",
-                    str([out_i.shape for out_i in node_id.stream_list]),
+                ]
+                + [str(out_i.shape) for out_i in node_id.stream_list]
+                + ["data type:", str(node_id.stream_list[0].stream_dtype)]
+            )
+        elif class_name in ["EagerMerge"]:
+            n.attr["label"] = "\n".join(
+                [
+                    str(node_id),
+                    "-------------",
+                    "output stream shape:",
+                    f"data: {node_id.stream_idx(0).shape}",
+                    f"sel: {node_id.stream_idx(1).shape}",
                     "data type:",
-                    str(node_id.stream_list[0].stream_dtype),
+                    str(node_id.stream_idx(0).stream_dtype),
+                    "sel type:",
+                    str(node_id.stream_idx(1).stream_dtype),
                 ]
             )
         else:
@@ -88,4 +103,4 @@ def save_graph_format(
     if "svg" in format:
         agraph.draw(f"{output_filename}.svg", prog="dot", format="svg")
 
-    print(f"finished writing the lowered STEP GRAPH to {output_filename}")
+    print(f"finished writing the STEP GRAPH to {output_filename}")

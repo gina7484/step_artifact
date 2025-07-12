@@ -13,7 +13,7 @@ from rewrite.broadcast import infer_broadcast
 from utils.moe import *
 
 
-def ws_tile_mn_mk_gemm_reshape(
+def hybrid_moe_gemm(
     step_graph: MultiDiGraph,
     model_config,
     batch: int,
@@ -33,7 +33,10 @@ def ws_tile_mn_mk_gemm_reshape(
     w_down_list: list[torch.Tensor],
     tile_N: int,  # M
     tile_F: int,  # Gate & Up (K), Down (N)
+    group_size: int,  # the number of experts that share the same area
 ) -> OffChipStore:
+    assert model_config.n_routed_experts % group_size == 0
+
     F = model_config.moe_inter_dim
     D = model_config.dim
 
@@ -128,7 +131,7 @@ def ws_tile_mn_mk_gemm_reshape(
     ]  # [(Dyn + tile_N -1) // tile_N] of tile_N x D
 
     # ------------ Stage 5: Repeat input features ------------
-    # - input stream shape:   [(Dyn + tile_N -1) // tile_N] x n_routed_experts (tile: [tile_N, D])
+    # - input stream shape:   [(Dyn + tile_N -1) // tile_N]              x n_routed_experts (tile: [tile_N, D])
     # - output stream shape:  [(Dyn + tile_N -1) // tile_N, F // tile_F] x n_routed_experts (tile: [tile_N, D])
     repeated_feature_streams = [
         RepeatStatic(
@@ -138,6 +141,23 @@ def ws_tile_mn_mk_gemm_reshape(
         )
         for i in range(model_config.n_routed_experts)
     ]
+
+    # ------------ Stage 5.5: Group input features (EagerMerge) ------------
+    # - input stream shape:         [ (Dyn + tile_N -1) // tile_N, F // tile_F] x n_routed_experts (tile: [tile_N, D])
+    # - output stream shape (data): [∑((Dyn + tile_N -1) // tile_N), F // tile_F] x (n_routed_experts // group_size) (tile: [tile_N, D])
+    # - output stream shape (sel):  [∑((Dyn + tile_N -1) // tile_N)]              x (n_routed_experts // group_size) (dtype: Multihot)
+    #                              (Here, the sum expresses the sum between the experts grouped together)
+    grouped_feature_streams: List[EagerMerge] = []
+    curr_group: List[RepeatStatic] = []
+    merge_rank = repeated_feature_streams[0].stream.rank
+    for i in range(model_config.n_routed_experts):
+        # group every group_size experts together and create an EagerMerge op
+        curr_group.append(repeated_feature_streams[i])
+        if i % group_size == group_size - 1:
+            grouped_feature_streams.append(
+                EagerMerge(step_graph, curr_group, merge_rank)  # type: ignore (Cannot infer RepeatStatic is a subclass of StepOps)
+            )
+            curr_group = []
 
     # ------------ Stage 6: Load up parameters ------------
     # - tensor shape: [D, F]
@@ -170,20 +190,63 @@ def ws_tile_mn_mk_gemm_reshape(
         for i in range(model_config.n_routed_experts)
     ]
 
+    # ------------ Stage 6.5: Reassemble the up weights for the currently executed expert ------------
+    # Shape information for each expert group (total number of expert groups: n_routed_experts // group_size)
+    # - input stream shape:   [  (Dyn + tile_N -1) // tile_N, F // tile_F] x group_size (tile: [D, tile_F])
+    # - control stream shape: [∑((Dyn + tile_N -1) // tile_N)]                         (dtype: Multihot)
+    # - output stream shape:  [∑((Dyn + tile_N -1) // tile_N), DynDim, F // tile_F]    (tile: [D, tile_F]) (The DynDim is actually 1)
+    reassembled_up_loads = [
+        FlatReassemble(
+            step_graph,
+            ready_up_loads[i * group_size : (i + 1) * group_size],  # type: ignore (Cannot infer Flatten is a subclass of StepOps)
+            (grouped_feature_streams[i], 1),  # idx: 0 (data), 1(sel)
+            reassemble_rank=1,
+            switch_cycles=[1 for _ in range(group_size)],
+            write_back_mu=False,
+        )
+        for i in range(model_config.n_routed_experts // group_size)
+    ]
+
+    # As we have the information that all the MultiHot in the control stream is a one-hot,
+    # we can replace the newly inserted DynDim with 1.
+    # (FlatReassemble inserts a new DynDim by default as it does not have the information of the data in the control stream)
+    # (Keeping this flexibility is intentional as this allows also expressing models that choose different number of experts at a time
+    # or control flow that chooses different number of branches at a time)
+    for reassembled_up_load_i in reassembled_up_loads:
+        reassembled_up_load_i.stream.shape = (
+            reassembled_up_load_i.stream.shape[:-2]
+            + (1,)
+            + reassembled_up_load_i.stream.shape[-1:]
+        )
+
+    # - input stream shape:  [∑((Dyn + tile_N -1) // tile_N), 1, F // tile_F] x n_routed_experts // group_size (tile: [D, tile_F])
+    # - output stream shape: [∑((Dyn + tile_N -1) // tile_N), F // tile_F]    x n_routed_experts // group_size (tile: [D, tile_F])
+    flattened_reassembled_up_loads = [
+        Flatten(
+            graph=step_graph,
+            input=reassembled_up_loads[i],
+            min_rank=0,
+            max_rank=1,
+        )
+        for i in range(model_config.n_routed_experts // group_size)
+    ]
+
     # ------------ Stage 7: Compute the up features ------------
-    # - input stream shape:   [(Dyn + tile_N -1) // tile_N, F // tile_F] (tile: [tile_N, D])
-    # - weight stream shape:  [(Dyn + tile_N -1) // tile_N, F // tile_F] (tile: [D, tile_F])
-    # - output stream shape:  [(Dyn + tile_N -1) // tile_N, F // tile_F] (tile: [tile_N, tile_F])
+    # - input stream shape:  [∑((Dyn + tile_N -1) // tile_N), F // tile_F] x (n_routed_experts // group_size) (tile: [tile_N, D])
+    # - weight stream shape: [∑((Dyn + tile_N -1) // tile_N), F // tile_F] x (n_routed_experts // group_size) (tile: [D, tile_F])
+    # - output stream shape: [∑((Dyn + tile_N -1) // tile_N), F // tile_F] x (n_routed_experts // group_size) (tile: [tile_N, tile_F])
     up_feature_streams = [
         BinaryMap(
             step_graph,
-            feature,
+            (feature, 0),  # idx: 0 (data), 1(sel)
             weight,
             map_fn.Matmul(weight_transposed=False),
             False,
             up_compute_bw,
         )
-        for feature, weight in zip(repeated_feature_streams, ready_up_loads)
+        for feature, weight in zip(
+            grouped_feature_streams, flattened_reassembled_up_loads
+        )
     ]
 
     # ------------ Stage 8: Load gate parameters ------------
@@ -205,8 +268,8 @@ def ws_tile_mn_mk_gemm_reshape(
         for i in range(model_config.n_routed_experts)
     ]
 
-    # - input stream shape:   [(Dyn + tile_N -1) // tile_N, F // tile_F, 1] (tile: [D, tile_F])
-    # - output stream shape:  [(Dyn + tile_N -1) // tile_N, F // tile_F]    (tile: [D, tile_F])
+    # - input stream shape:  [(Dyn + tile_N -1) // tile_N, F // tile_F, 1] (tile: [D, tile_F])
+    # - output stream shape: [(Dyn + tile_N -1) // tile_N, F // tile_F]    (tile: [D, tile_F])
     ready_gate_loads = [
         Flatten(
             graph=step_graph,
@@ -217,25 +280,63 @@ def ws_tile_mn_mk_gemm_reshape(
         for i in range(model_config.n_routed_experts)
     ]
 
+    # ------------ Stage 7.5: Reassemble the gate weights for the currently executed expert ------------
+    # Shape information for each expert group
+    # - input stream shape:   [  (Dyn + tile_N -1) // tile_N, F // tile_F] x group_size (tile: [D, tile_F])
+    # - control stream shape: [∑((Dyn + tile_N -1) // tile_N)]                         (dtype: Multihot)
+    # - output stream shape:  [∑((Dyn + tile_N -1) // tile_N), DynDim, F // tile_F]    (tile: [D, tile_F]) (The DynDim is actually 1)
+    reassembled_gate_loads = [
+        FlatReassemble(
+            step_graph,
+            ready_gate_loads[i * group_size : (i + 1) * group_size],  # type: ignore (Cannot infer Flatten is a subclass of StepOps)
+            (grouped_feature_streams[i], 1),  # idx: 0 (data), 1(sel)
+            reassemble_rank=1,
+            switch_cycles=[1 for _ in range(group_size)],
+            write_back_mu=False,
+        )
+        for i in range(model_config.n_routed_experts // group_size)
+    ]
+
+    for reassembled_gate_load_i in reassembled_gate_loads:
+        reassembled_gate_load_i.stream.shape = (
+            reassembled_gate_load_i.stream.shape[:-2]
+            + (1,)
+            + reassembled_gate_load_i.stream.shape[-1:]
+        )
+
+    # - input stream shape:  [∑((Dyn + tile_N -1) // tile_N), 1, F // tile_F] x n_routed_experts // group_size (tile: [D, tile_F])
+    # - output stream shape: [∑((Dyn + tile_N -1) // tile_N), F // tile_F]    x n_routed_experts // group_size (tile: [D, tile_F])
+    flattened_reassembled_gate_loads = [
+        Flatten(
+            graph=step_graph,
+            input=reassembled_gate_loads[i],
+            min_rank=0,
+            max_rank=1,
+        )
+        for i in range(model_config.n_routed_experts // group_size)
+    ]
+
     # ------------ Stage 8: Compute the gate features ------------
-    # - input stream shape:   [(Dyn + tile_N -1) // tile_N, F // tile_F] (tile: [tile_N, D])
-    # - weight stream shape:  [(Dyn + tile_N -1) // tile_N, F // tile_F] (tile: [D, tile_F])
-    # - output stream shape:  [(Dyn + tile_N -1) // tile_N, F // tile_F] (tile: [tile_N, tile_F])
+    # - input stream shape:  [∑((Dyn + tile_N -1) // tile_N), F // tile_F] x (n_routed_experts // group_size) (tile: [tile_N, D])
+    # - weight stream shape: [∑((Dyn + tile_N -1) // tile_N), F // tile_F] x (n_routed_experts // group_size) (tile: [D, tile_F])
+    # - output stream shape: [∑((Dyn + tile_N -1) // tile_N), F // tile_F] x (n_routed_experts // group_size) (tile: [tile_N, tile_F])
     pre_act_gate_feature_streams = [
         BinaryMap(
             step_graph,
-            feature,
+            (feature, 0),  # idx: 0 (data), 1(sel)
             weight,
             map_fn.Matmul(weight_transposed=False),
             False,
             gate_compute_bw,
         )
-        for feature, weight in zip(repeated_feature_streams, ready_gate_loads)
+        for feature, weight in zip(
+            grouped_feature_streams, flattened_reassembled_gate_loads
+        )
     ]
 
     # ------------ Stage 9: Compute the activation ------------
-    # - input stream shape:   [(Dyn + tile_N -1) // tile_N, F // tile_F] (tile: [tile_N, tile_F])
-    # - output stream shape:  [(Dyn + tile_N -1) // tile_N, F // tile_F] (tile: [tile_N, tile_F])
+    # - input stream shape:   [∑((Dyn + tile_N -1) // tile_N), F // tile_F] (tile: [tile_N, tile_F])
+    # - output stream shape:  [∑((Dyn + tile_N -1) // tile_N), F // tile_F] (tile: [tile_N, tile_F])
     gate_feature_streams = [
         UnaryMap(
             graph=step_graph,
@@ -248,9 +349,9 @@ def ws_tile_mn_mk_gemm_reshape(
     ]
 
     # ------------ Stage 10: Compute the projected features ------------
-    # - input1 stream shape:   [(Dyn + tile_N -1) // tile_N, F // tile_F] (tile: [tile_N1, tile_F])
-    # - input2 stream shape:   [(Dyn + tile_N -1) // tile_N, F // tile_F] (tile: [tile_N, tile_F])
-    # - output stream shape:   [(Dyn + tile_N -1) // tile_N, F // tile_F] (tile: [tile_N, tile_F])
+    # - input1 stream shape:   [∑((Dyn + tile_N -1) // tile_N), F // tile_F] (tile: [tile_N1, tile_F])
+    # - input2 stream shape:   [∑((Dyn + tile_N -1) // tile_N), F // tile_F] (tile: [tile_N, tile_F])
+    # - output stream shape:   [∑((Dyn + tile_N -1) // tile_N), F // tile_F] (tile: [tile_N, tile_F])
     projected_feature_streams = [
         BinaryMap(
             step_graph, up_feature, gate_feature, map_fn.Mul(), False, mult_compute_bw
@@ -278,7 +379,7 @@ def ws_tile_mn_mk_gemm_reshape(
     ]
 
     # - input stream shape:   [(Dyn + tile_N -1) // tile_N, F // tile_F, 1] (tile: [tile_F, D])
-    # - output stream shape:  [(Dyn + tile_N -1) // tile_N, F // tile_F] (tile: [tile_F, D])
+    # - output stream shape:  [(Dyn + tile_N -1) // tile_N, F // tile_F]    (tile: [tile_F, D])
     ready_down_loads = [
         Flatten(
             graph=step_graph,
@@ -289,10 +390,46 @@ def ws_tile_mn_mk_gemm_reshape(
         for i in range(model_config.n_routed_experts)
     ]
 
+    # ------------ Stage 11.5: Reassemble the down weights for the currently executed expert ------------
+    # Shape information for each expert group
+    # - input stream shape:   [ (Dyn + tile_N -1) // tile_N, F // tile_F] x group_size (tile: [tile_F, D])
+    # - control stream shape: [∑((Dyn + tile_N -1) // tile_N)]                      (dtype: Multihot)
+    # - output stream shape:  [∑((Dyn + tile_N -1) // tile_N), DynDim, F // tile_F] (tile: [tile_F, D]) (The DynDim is actually 1)
+    reassembled_down_loads = [
+        FlatReassemble(
+            step_graph,
+            ready_down_loads[i * group_size : (i + 1) * group_size],  # type: ignore (Cannot infer Flatten is a subclass of StepOps)
+            (grouped_feature_streams[i], 1),  # idx: 0 (data), 1(sel)
+            reassemble_rank=1,
+            switch_cycles=[1 for _ in range(group_size)],
+            write_back_mu=False,
+        )
+        for i in range(model_config.n_routed_experts // group_size)
+    ]
+
+    for reassembled_down_load_i in reassembled_down_loads:
+        reassembled_down_load_i.stream.shape = (
+            reassembled_down_load_i.stream.shape[:-2]
+            + (1,)
+            + reassembled_down_load_i.stream.shape[-1:]
+        )
+
+    # - input stream shape:  [∑((Dyn + tile_N -1) // tile_N), 1, F // tile_F] x n_routed_experts // group_size (tile: [tile_F, D])
+    # - output stream shape: [∑((Dyn + tile_N -1) // tile_N), F // tile_F]    x n_routed_experts // group_size (tile: [tile_F, D])
+    flattened_reassembled_down_loads = [
+        Flatten(
+            graph=step_graph,
+            input=reassembled_down_loads[i],
+            min_rank=0,
+            max_rank=1,
+        )
+        for i in range(model_config.n_routed_experts // group_size)
+    ]
+
     # ------------ Stage 12: Compute the down features ------------
-    # - input stream shape:   [(Dyn + tile_N -1) // tile_N, F // tile_F] (tile: [tile_N, tile_F])
-    # - weight stream shape:  [(Dyn + tile_N -1) // tile_N, F // tile_F] (tile: [tile_F, D])
-    # - output stream shape:  [(Dyn + tile_N -1) // tile_N]              (tile: [tile_N, D])
+    # - input stream shape:  [∑((Dyn + tile_N -1) // tile_N), F // tile_F] x (n_routed_experts // group_size) (tile: [tile_N, tile_F])
+    # - weight stream shape: [∑((Dyn + tile_N -1) // tile_N), F // tile_F] x (n_routed_experts // group_size) (tile: [tile_F, D])
+    # - output stream shape: [∑((Dyn + tile_N -1) // tile_N)             ] x (n_routed_experts // group_size) (tile: [tile_N, D])
     chunked_down_feature_streams = [
         BinaryMapAccum(
             step_graph,
@@ -304,16 +441,45 @@ def ws_tile_mn_mk_gemm_reshape(
             False,
             down_compute_bw,
         )
-        for feature, weight in zip(projected_feature_streams, ready_down_loads)
+        for feature, weight in zip(
+            projected_feature_streams, flattened_reassembled_down_loads
+        )
     ]
 
     # ------------ Stage 12.5: Partition & Retile outputs for each expert ------------
-    # - input stream shape:  [(Dyn + tile_N -1) // tile_N] (tile: [tile_N, D])
-    # - output stream shape: [Dyn_retile]                  (tile: [1, D])
+    # - input stream shape:   [∑((Dyn + tile_N -1) // tile_N)] x (n_routed_experts // group_size) (tile: [tile_N, D])
+    # - control stream shape: [∑((Dyn + tile_N -1) // tile_N)] x (n_routed_experts // group_size) (dtype: Multihot)
+    # - output stream shape:  [  (Dyn + tile_N -1) // tile_N ] x  n_routed_experts                (tile: [tile_N, D])
+    output_per_expert = [
+        FlatPartition(
+            step_graph,
+            chunked_down_feature_streams[i],
+            (grouped_feature_streams[i], 1),  # idx: 0 (data), 1(sel)
+            partition_rank=0,
+            switch_cycles=[1 for _ in range(group_size)],
+            write_back_mu=False,
+            num_consumers=group_size,
+        )
+        for i in range(model_config.n_routed_experts // group_size)
+    ]
+
+    # replace the dynamic dims with the dyndims used before the eager merge
+    for expert_group_idx, op in enumerate(output_per_expert):
+        op: FlatPartition
+        for expert_idx, expert_stream in enumerate(op.stream_list):
+            expert_stream.shape = (
+                expert_feature_streams[
+                    expert_group_idx * group_size + expert_idx
+                ].stream.shape[0],
+            ) + expert_stream.shape[1:]
+
+    # - input stream shape:  [(Dyn + tile_N -1) // tile_N] x  n_routed_experts (tile: [tile_N, D])
+    # - output stream shape: [Dyn_retile]                  x  n_routed_experts (tile: [1, D])
+    #   (after replacement): [Dyn]                         x  n_routed_experts (tile: [1, D])
     down_feature_streams = [
         RetileStreamify(
             graph=step_graph,
-            input=chunked_down_feature_streams[i],
+            input=(output_per_expert[i // group_size], i % group_size),
             split_row=True,
             filter_mask=True,
         )
@@ -359,24 +525,6 @@ def ws_tile_mn_mk_gemm_reshape(
         for i in range(model_config.n_routed_experts)
     ]
 
-    # idx_to_print = 4
-    # # Expert counts: tensor([21, 21, 11, 16, 16, 12, 12, 19])
-    # for i in range(model_config.n_routed_experts):
-    #     if i == idx_to_print:
-    #         consume = ConsumerContext(
-    #             graph=step_graph,
-    #             input=(expert_weight_streams, i),
-    #         )
-
-    #         printc = PrinterContext(
-    #             graph=step_graph,
-    #             input=down_feature_streams[i],
-    #         )
-    #     else:
-    #         con_i = ConsumerContext(graph=step_graph, input=(expert_weight_streams, i))
-
-    #         con_f = ConsumerContext(graph=step_graph, input=down_feature_streams[i])
-
     # ------------ Stage 15: Reassemble the weighted features ------------
     # Reassemble
     feature_select_gen_reassemble = SelectGen(
@@ -419,7 +567,7 @@ def ws_tile_mn_mk_gemm_reshape(
     return output
 
 
-def call_ws_tile_mn_mk_gemm_reshape(
+def call_hybrid_moe_gemm(
     model_config,
     batch: int,
     gate_compute_bw: int,
@@ -438,13 +586,14 @@ def call_ws_tile_mn_mk_gemm_reshape(
     w_down_list: list[torch.Tensor],
     tile_N: int,
     tile_F: int,
+    group_size: int,
     save_graph: bool,
-    simulate_rust: bool,
+    simulate_rust: str,
     logging: Optional[str] = None,
 ) -> tuple[StepOps, sympy.Expr, sympy.Expr]:
     step_graph = MultiDiGraph()
 
-    output: OffChipStore = ws_tile_mn_mk_gemm_reshape(
+    output: OffChipStore = hybrid_moe_gemm(
         step_graph=step_graph,
         model_config=model_config,
         batch=batch,
@@ -464,6 +613,7 @@ def call_ws_tile_mn_mk_gemm_reshape(
         w_down_list=w_down_list,
         tile_N=tile_N,
         tile_F=tile_F,
+        group_size=group_size,
     )
 
     print(f"Output untiled: {output.get_untiled_shape()}")
@@ -471,8 +621,8 @@ def call_ws_tile_mn_mk_gemm_reshape(
     step_graph = infer_broadcast(step_graph)
 
     if save_graph:
-        OUTPUT_FILENAME = "moe_expert_par_gemm_reshape"
-        save_graph_format(step_graph, OUTPUT_FILENAME, ["png"])
+        OUTPUT_FILENAME = "hybrid_moe_gemm"
+        save_graph_format(step_graph, OUTPUT_FILENAME, ["svg"])
 
     total_off_chip_traffic = sympy.Integer(0)
     total_on_chip_requirement = sympy.Integer(0)
@@ -489,7 +639,7 @@ def call_ws_tile_mn_mk_gemm_reshape(
         else:
             raise ValueError(f"Node {node} in the graph is not a StepOps")
 
-    if simulate_rust:
+    if simulate_rust in ["full", "timing"]:
         hbm_config = HBMConfig(64, 8, 2, 2, 1, 14)
         sim_config = SimConfig(channel_depth=1)
 
@@ -500,6 +650,7 @@ def call_ws_tile_mn_mk_gemm_reshape(
                 hbm_config,
                 sim_config,
                 "/home/ginasohn/step_tl/graph.pb",
+                simulate_rust == "full",
             )
         else:
             assert isinstance(logging, str), "Logging must be a string path"
@@ -509,6 +660,7 @@ def call_ws_tile_mn_mk_gemm_reshape(
                 hbm_config,
                 sim_config,
                 "/home/ginasohn/step_tl/graph.pb",
+                simulate_rust == "full",
                 logging,
             )
 
@@ -539,8 +691,8 @@ class SmallerDeepSeekV3:
 class SmallerMixtral:  # 32x scaled down version for each dimension
     n_routed_experts = 8
     n_activated_experts = 2
-    dim = 128  # 4096/32
-    moe_inter_dim = 448  # 14336/32 (Can use tile size of 64)
+    dim = 64  # 4096/64
+    moe_inter_dim = 224  # 14336/64 (Can use tile size upto 32)
 
 
 @dataclass
@@ -611,9 +763,10 @@ def get_expert_selection(
         return (expert_indices, expert_counts)
 
 
-def run_ws_tile_mn_mk(tile_N: int):
+def run_hybrid_moe_gemm(tile_N: int, tile_F: int, group_size: int):
     # ------------ Sim Conig ------------
-    simulate_rust = True
+    simulate_rust = "full"  # either "full", "timing", "none"
+    gold_check = True
 
     # ------------ Model Configuration ------------
     model_config = SmallerMixtral()
@@ -621,9 +774,12 @@ def run_ws_tile_mn_mk(tile_N: int):
     # ------------ Batch Size ------------
     B = 64
 
+    # ------------ Group Size ------------
+    GROUP_SIZE = group_size
+
     # ------------ Tile Configuration ------------
     tile_N = tile_N  # M (The number of requests to chunk for the GEMM in each expert)
-    tile_F = 32  # K (The tile size used for the model_config.dim dimension)
+    tile_F = tile_F  # K (The tile size used for the model_config.dim dimension)
     # For the model_config.moe_inter_dim dimension, we don't tile
     # For Gate & Up linear, we use TileMN. For Down linear, we use TileMK.
 
@@ -692,14 +848,14 @@ def run_ws_tile_mn_mk(tile_N: int):
     off_chip_traffic: sympy.Expr
     on_chip_requirement: sympy.Expr
 
-    output, off_chip_traffic, on_chip_requirement = call_ws_tile_mn_mk_gemm_reshape(  # type: ignore (Cannot infer type of output properly)
+    output, off_chip_traffic, on_chip_requirement = call_hybrid_moe_gemm(  # type: ignore (Cannot infer type of output properly)
         model_config=model_config,
         batch=B,
-        gate_compute_bw=GATE_COMPUTE_BW,
-        up_compute_bw=UP_COMPUTE_BW,
-        act_fn_compute_bw=ACT_FN_COMPUTE_BW,
-        mult_compute_bw=MULT_COMPUTE_BW,
-        down_compute_bw=DOWN_COMPUTE_BW,
+        gate_compute_bw=GATE_COMPUTE_BW * GROUP_SIZE,
+        up_compute_bw=UP_COMPUTE_BW * GROUP_SIZE,
+        act_fn_compute_bw=ACT_FN_COMPUTE_BW * GROUP_SIZE,
+        mult_compute_bw=MULT_COMPUTE_BW * GROUP_SIZE,
+        down_compute_bw=DOWN_COMPUTE_BW * GROUP_SIZE,
         weight_scale_compute_bw=WEIGHT_SCALE_COMPUTE_BW,
         accum_compute_bw=ACCUM_COMPUTE_BW,
         input_tensor=input_tensor,
@@ -711,12 +867,13 @@ def run_ws_tile_mn_mk(tile_N: int):
         w_down_list=w_down_list,
         tile_F=tile_F,
         tile_N=tile_N,
-        save_graph=False,
+        group_size=GROUP_SIZE,
+        save_graph=True,
         simulate_rust=simulate_rust,
         # logging="expert_par_gemm_reshape",
     )
 
-    if simulate_rust:
+    if simulate_rust and gold_check:
         # Gold calculation
         final_gold = moe_gold_calc(
             input_tensor,
@@ -730,69 +887,69 @@ def run_ws_tile_mn_mk(tile_N: int):
         check_gold_tensor(output.store_file_name, final_gold)
 
     # ------------ substitue symbols in the off_chip_traffic and on_chip_requirement ------------
-    print(f"\n\n=================== TILE SIZE: {tile_N} ===================")
-    print(f"Batch size: {B}")
-    print(f"Model config: {model_config}")
-    print(f"Tile F: {tile_F}")
+    # print(f"\n\n=================== CONFIG ===================")
+    # print(f"Batch size: {B}")
+    # print(f"Model config: {model_config}")
+    # print(f"Tile F: {tile_F}")
+    # print(f"Tile N: {tile_N}")
+    # print(f"Group size: {GROUP_SIZE}")
 
-    num_tiles = [
-        (routed_toks + tile_N - 1) // tile_N for routed_toks in expert_counts.tolist()
-    ]
+    # num_tiles = [
+    #     (routed_toks + tile_N - 1) // tile_N for routed_toks in expert_counts.tolist()
+    # ]
 
-    after_pad_batch_dim = [num_tiles_i * tile_N for num_tiles_i in num_tiles]
+    # after_pad_batch_dim = [num_tiles_i * tile_N for num_tiles_i in num_tiles]
 
-    padded_rows = [
-        total_toks - raw_toks
-        for total_toks, raw_toks in zip(after_pad_batch_dim, expert_counts.tolist())
-    ]
+    # padded_rows = [
+    #     total_toks - raw_toks
+    #     for total_toks, raw_toks in zip(after_pad_batch_dim, expert_counts.tolist())
+    # ]
 
-    print(f"Padded rows: {padded_rows}")
+    # print(f"Padded rows: {padded_rows}")
 
-    flops = sum(
-        [
-            (
-                2 * b * model_config.dim * model_config.moe_inter_dim * 3
-            )  # 3 (Linear layers)
-            + b * model_config.moe_inter_dim  # 1 (Element-wise mult)
-            + (
-                8 * b * model_config.dim * model_config.moe_inter_dim
-            )  # silu_flops: 1(neg)+4(exp)+1(add)+1(div)+1(mul)= 8 FLOPs per element
-            for b in after_pad_batch_dim
-        ]
-    )
+    # flops = sum(
+    #     [
+    #         (
+    #             2 * b * model_config.dim * model_config.moe_inter_dim * 3
+    #         )  # 3 (Linear layers)
+    #         + b * model_config.moe_inter_dim  # 1 (Element-wise mult)
+    #         + (
+    #             8 * b * model_config.dim * model_config.moe_inter_dim
+    #         )  # silu_flops: 1(neg)+4(exp)+1(add)+1(div)+1(mul)= 8 FLOPs per element
+    #         for b in after_pad_batch_dim
+    #     ]
+    # )
 
-    print(f"Total flops: {flops}")
+    # print(f"Total flops: {flops}")
 
-    padded_flops = sum(
-        [
-            (
-                2 * b * model_config.dim * model_config.moe_inter_dim * 3
-            )  # 3 (Linear layers)
-            + b * model_config.moe_inter_dim  # 1 (Element-wise mult)
-            + (
-                8 * b * model_config.dim * model_config.moe_inter_dim
-            )  # silu_flops: 1(neg)+4(exp)+1(add)+1(div)+1(mul)= 8 FLOPs per element
-            for b in padded_rows
-        ]
-    )
+    # padded_flops = sum(
+    #     [
+    #         (
+    #             2 * b * model_config.dim * model_config.moe_inter_dim * 3
+    #         )  # 3 (Linear layers)
+    #         + b * model_config.moe_inter_dim  # 1 (Element-wise mult)
+    #         + (
+    #             8 * b * model_config.dim * model_config.moe_inter_dim
+    #         )  # silu_flops: 1(neg)+4(exp)+1(add)+1(div)+1(mul)= 8 FLOPs per element
+    #         for b in padded_rows
+    #     ]
+    # )
 
-    print(f"Total padded flops: {padded_flops}")
+    # print(f"Total padded flops: {padded_flops}")
 
-    # substitue symbols in the off_chip_traffic
-    print(f"Total on-chip requirement (bytes): {on_chip_requirement}")
-    print(f"Total off-chip traffic (bytes): {off_chip_traffic}")
+    # # substitue symbols in the off_chip_traffic
+    # print(f"Total on-chip requirement (bytes): {on_chip_requirement}")
+    # print(f"Total off-chip traffic (bytes): {off_chip_traffic}")
 
-    free_symbols = sorted(off_chip_traffic.free_symbols, key=str)
-    print(f"Free symbols: {free_symbols}")
+    # free_symbols = sorted(off_chip_traffic.free_symbols, key=str)
+    # print(f"Free symbols: {free_symbols}")
 
-    sub_dict = {
-        symbol: value for symbol, value in zip(free_symbols, expert_counts.tolist())
-    }
-    off_chip_traffic_val = off_chip_traffic.subs(sub_dict)
-    print(f"Total off-chip traffic (bytes): {off_chip_traffic_val}")
+    # sub_dict = {
+    #     symbol: value for symbol, value in zip(free_symbols, expert_counts.tolist())
+    # }
+    # off_chip_traffic_val = off_chip_traffic.subs(sub_dict)
+    # print(f"Total off-chip traffic (bytes): {off_chip_traffic_val}")
 
 
-def test_mixtral_gemm_sweep():
-    tile_Ns = [4, 8, 16, 32, 64]
-    for tile_N in tile_Ns:
-        run_ws_tile_mn_mk(tile_N)
+def test_group_size_sweep():
+    run_hybrid_moe_gemm(tile_N=32, tile_F=32, group_size=2)

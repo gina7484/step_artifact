@@ -30,10 +30,10 @@ def simulate(
     hbm_config: HBMConfig,
     sim_config: SimConfig,
     protobuf_file: str,
+    functional: bool,  # whether to do the functional simulation or just do timing sim
     db_name: Optional[str] = None,
 ):
-
-    serialize(graph, protobuf_file)
+    serialize(graph, protobuf_file, functional)
 
     result, cycles, duration_ms, duration_s = (
         step_perf.run_graph(  # pylint: disable=no-member
@@ -170,7 +170,7 @@ def to_pb_datatype(dtype: Union[Tile, Buffer, Select]) -> datatype_pb2.DataType:
 
 
 # pylint: disable=no-member
-def serialize(graph: MultiDiGraph, protobuf_file: str):
+def serialize(graph: MultiDiGraph, protobuf_file: str, functional: bool):
     prog_graph = graph_pb2.ProgramGraph()  # pylint: disable=no-member
     prog_graph.name = ""
 
@@ -219,9 +219,11 @@ def serialize(graph: MultiDiGraph, protobuf_file: str):
             offchipload_pb.dtype.CopyFrom(to_pb_datatype(op.stream.stream_dtype))
 
             file_path = f"{str(op)}.npy"
-            np.save(file_path, op.underlying.detach().numpy())
             offchipload_pb.npy_path = file_path
-            print(f"Saved {str(op)} data to {file_path}")
+
+            if functional:
+                np.save(file_path, op.underlying.detach().numpy())
+                print(f"Saved {str(op)} data to {file_path}")
 
             operator.off_chip_load.CopyFrom(offchipload_pb)
         elif isinstance(op, DynOffChipLoad):
@@ -252,9 +254,10 @@ def serialize(graph: MultiDiGraph, protobuf_file: str):
             dyn_offchipload_pb.dtype.CopyFrom(to_pb_datatype(op.stream.stream_dtype))
 
             file_path = f"{str(op)}.npy"
-            np.save(file_path, op.underlying.detach().numpy())
+            if functional:
+                np.save(file_path, op.underlying.detach().numpy())
+                print(f"Saved {str(op)} data to {file_path}")
             dyn_offchipload_pb.npy_path = file_path
-            print(f"Saved {str(op)} data to {file_path}")
 
             operator.dyn_off_chip_load.CopyFrom(dyn_offchipload_pb)
         elif isinstance(op, BinaryMap):
@@ -631,8 +634,9 @@ def serialize(graph: MultiDiGraph, protobuf_file: str):
 
             file_path = f"{str(op)}.npy"
             selectgen_pb.npy_path = file_path
-            np.save(file_path, op.underlying.detach().numpy())
-            print(f"Saved {str(op)} data to {file_path}")
+            if functional:
+                np.save(file_path, op.underlying.detach().numpy())
+                print(f"Saved {str(op)} data to {file_path}")
 
             operator.select_gen.CopyFrom(selectgen_pb)
         elif isinstance(op, PrinterContext):
