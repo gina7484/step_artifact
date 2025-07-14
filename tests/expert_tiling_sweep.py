@@ -211,7 +211,7 @@ def test_expert_tiling_sweep():
     csv_filename = "expert_tiling_sweep.csv"
 
     # ------------ Model Configuration ------------
-    model_config = TinyExample()
+    model_config = SimpleExample()
 
     # ------------ Batch Size ------------
     B = 32
