@@ -526,18 +526,20 @@ def test_expert_tiling_sweep_single_schedule():
     }
 
     # ------------ Sim Conig ------------
-    simulate_mode = "functional"
-    # simulate_mode = "timing"
+    # simulate_mode = "full"
+    simulate_mode = "timing"
     # simulate_mode = None
 
-    check_gold = True
+    check_gold = False
 
     logging = False
 
     par_dispatch = 4
 
     tiling_schedule_name = "mn_mk"
-    csv_filename = f"expert_tiling_sweep_{tiling_schedule_name}_duration.csv"
+    csv_filename = (
+        None  # f"expert_tiling_sweep_{tiling_schedule_name}_duration_timing.csv"
+    )
 
     # ------------ Model Configuration ------------
     model_config = SimpleExample()
@@ -586,20 +588,20 @@ def test_expert_tiling_sweep_single_schedule():
 
     tiling_schedule_to_test = [
         {"tile_m": 16, "tile_n": 16},
-        {"tile_m": 16, "tile_n": 32},
-        {"tile_m": 16, "tile_n": 64},
+        # {"tile_m": 16, "tile_n": 32},
+        # {"tile_m": 16, "tile_n": 64},
         {"tile_m": 16, "tile_n": 128},
-        {"tile_m": 16, "tile_n": 256},
-        {"tile_m": 32, "tile_n": 16},
-        {"tile_m": 32, "tile_n": 32},
-        {"tile_m": 32, "tile_n": 64},
-        {"tile_m": 32, "tile_n": 128},
-        {"tile_m": 32, "tile_n": 256},
-        {"tile_m": 64, "tile_n": 16},
-        {"tile_m": 64, "tile_n": 32},
-        {"tile_m": 64, "tile_n": 64},
-        {"tile_m": 64, "tile_n": 128},
-        {"tile_m": 64, "tile_n": 256},
+        # {"tile_m": 16, "tile_n": 256},
+        # {"tile_m": 32, "tile_n": 16},
+        # {"tile_m": 32, "tile_n": 32},
+        # {"tile_m": 32, "tile_n": 64},
+        # {"tile_m": 32, "tile_n": 128},
+        # {"tile_m": 32, "tile_n": 256},
+        # {"tile_m": 64, "tile_n": 16},
+        # {"tile_m": 64, "tile_n": 32},
+        # {"tile_m": 64, "tile_n": 64},
+        # {"tile_m": 64, "tile_n": 128},
+        # {"tile_m": 64, "tile_n": 256},
     ]
     for idx, tiling_size in enumerate(tiling_schedule_to_test):
         tiling_schedule = tiling_schedule_list[
@@ -711,33 +713,33 @@ def test_expert_tiling_sweep_single_schedule():
         # save_graph_format(step_graph, OUTPUT_FILENAME, ["svg", "png"])
 
         # ------------ Access-Reuse Analysis ------------
-        #     total_off_chip_traffic = sympy.Integer(0)
-        #     total_on_chip_requirement = sympy.Integer(0)
+        total_off_chip_traffic = sympy.Integer(0)
+        total_on_chip_requirement = sympy.Integer(0)
 
-        #     for node_tuple in step_graph.nodes(data=True):
-        #         node, data = node_tuple
-        #         if isinstance(node, StepOps):
-        #             total_off_chip_traffic = sympy.Add(
-        #                 total_off_chip_traffic, node.off_chip_traffic()
-        #             )
-        #             total_on_chip_requirement = sympy.Add(
-        #                 total_on_chip_requirement, node.on_chip_requirement()
-        #             )
-        #         else:
-        #             raise ValueError(f"Node {node} in the graph is not a StepOps")
+        for node_tuple in step_graph.nodes(data=True):
+            node, data = node_tuple
+            if isinstance(node, StepOps):
+                total_off_chip_traffic = sympy.Add(
+                    total_off_chip_traffic, node.off_chip_traffic()
+                )
+                total_on_chip_requirement = sympy.Add(
+                    total_on_chip_requirement, node.on_chip_requirement()
+                )
+            else:
+                raise ValueError(f"Node {node} in the graph is not a StepOps")
 
-        #     print(f"Total on-chip requirement (bytes): {total_on_chip_requirement}")
-        #     print(f"Total off-chip traffic (bytes): {total_off_chip_traffic}")
+        print(f"Total on-chip requirement (bytes): {total_on_chip_requirement}")
+        print(f"Total off-chip traffic (bytes): {total_off_chip_traffic}")
 
-        #     result_metrics.on_chip_requirement = int(total_on_chip_requirement)  # bytes
-        #     result_metrics.off_chip_traffic = int(total_off_chip_traffic)  # bytes
-        #     result_metrics.operational_intensity = (
-        #         result_metrics.flops / result_metrics.off_chip_traffic
-        #     )  # flops/byte
+        result_metrics.on_chip_requirement = int(total_on_chip_requirement)  # bytes
+        result_metrics.off_chip_traffic = int(total_off_chip_traffic)  # bytes
+        result_metrics.operational_intensity = (
+            result_metrics.flops / result_metrics.off_chip_traffic
+        )  # flops/byte
 
         #     # ------------ Simulate ------------
         cycles = None
-        if simulate_mode == "functional":
+        if simulate_mode in ["full", "timing"]:
             n_channel = 8
             channel_depth = 1
             hbm_config = HBMConfig(64, n_channel, 2, 2, 1, 14)
@@ -764,6 +766,7 @@ def test_expert_tiling_sweep_single_schedule():
                     hbm_config,
                     sim_config,
                     "/home/ginasohn/step_tl/graph.pb",
+                    simulate_mode == "full",
                 )
             else:
                 cycles, duration_ms, duration_s = simulate(
@@ -772,6 +775,7 @@ def test_expert_tiling_sweep_single_schedule():
                     hbm_config,
                     sim_config,
                     "/home/ginasohn/step_tl/graph.pb",
+                    simulate_mode == "full",
                     f"expert_{tiling_schedule_name}_{tile_m}_{tile_k}_{tile_n}_{tile_n_down}",
                 )
 
@@ -779,20 +783,17 @@ def test_expert_tiling_sweep_single_schedule():
             result_metrics.duration_ms = duration_ms
             result_metrics.duration_s = duration_s
 
-        elif simulate_mode == "timing":
-            pass
+        # ------------ Gold Calculation & Verification ------------
 
-        #     # ------------ Gold Calculation & Verification ------------
-
-        #     if check_gold:
-        #         down = gold_calc(
-        #             input=input_tensor,
-        #             w_gate=linear_gate_list[0],
-        #             w_up=linear_up_list[0],
-        #             w_down=linear_down_list[0],
-        #         )
-        #         print(f"Down: {output.get_untiled_shape()}")
-        #         check_gold_tensor(output.store_file_name, down)
+        if (simulate_mode == "full") and check_gold:
+            down = gold_calc(
+                input=input_tensor,
+                w_gate=linear_gate_list[0],
+                w_up=linear_up_list[0],
+                w_down=linear_down_list[0],
+            )
+            print(f"Down: {output.get_untiled_shape()}")
+            check_gold_tensor(output.store_file_name, down)
 
         result_metrics_list.append(result_metrics)
 
