@@ -38,28 +38,12 @@ class DeepSeekV316B:
 
 
 @dataclass
-class SmallerDeepSeekV3:
+class Qwen30b:
     n_expert_sim = 1
-    # n_routed_experts = 64
-    # n_activated_experts = 6
-    dim = 64  # 2048 // 32 = 64
-    moe_inter_dim = 352  # 1408 // 4 (Can use tile size of 32)
-
-
-@dataclass
-class SmallerMixtral:  # 32x scaled down version for each dimension
-    n_expert_sim = 1
-    # n_routed_experts = 8
-    # n_activated_experts = 2
-    dim = 128  # 4096/32
-    moe_inter_dim = 448  # 14336/32 (Can use tile size of 64)
-
-
-@dataclass
-class TinyExample:  # 32x scaled down version for each dimension
-    n_expert_sim = 1
-    dim = 64
-    moe_inter_dim = 32
+    # n_routed_experts = 128
+    # n_activated_experts = 8
+    dim = 2048
+    moe_inter_dim = 768
 
 
 @dataclass
@@ -527,22 +511,20 @@ def test_expert_tiling_sweep_single_schedule():
 
     # ------------ Sim Conig ------------
     # simulate_mode = "full"
-    simulate_mode = "timing"
+    simulate_mode = "full"
     # simulate_mode = None
 
-    check_gold = False
+    check_gold = True
 
     logging = False
 
     par_dispatch = 4
 
     tiling_schedule_name = "mn_mk"
-    csv_filename = (
-        None  # f"expert_tiling_sweep_{tiling_schedule_name}_duration_timing.csv"
-    )
+    csv_filename = f"expert_tiling_sweep_{tiling_schedule_name}_qwen30b_full.csv"
 
     # ------------ Model Configuration ------------
-    model_config = SimpleExample()
+    model_config = Qwen30b()
 
     # ------------ Batch Size ------------
     B = 64
@@ -587,14 +569,14 @@ def test_expert_tiling_sweep_single_schedule():
     result_metrics_list = []
 
     tiling_schedule_to_test = [
-        {"tile_m": 16, "tile_n": 16},
+        # {"tile_m": 16, "tile_n": 16},
         # {"tile_m": 16, "tile_n": 32},
-        # {"tile_m": 16, "tile_n": 64},
-        {"tile_m": 16, "tile_n": 128},
+        {"tile_m": 16, "tile_n": 64},
+        # {"tile_m": 16, "tile_n": 128},
         # {"tile_m": 16, "tile_n": 256},
         # {"tile_m": 32, "tile_n": 16},
         # {"tile_m": 32, "tile_n": 32},
-        # {"tile_m": 32, "tile_n": 64},
+        {"tile_m": 32, "tile_n": 64},
         # {"tile_m": 32, "tile_n": 128},
         # {"tile_m": 32, "tile_n": 256},
         # {"tile_m": 64, "tile_n": 16},
