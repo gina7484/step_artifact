@@ -709,6 +709,14 @@ class Qwen30b:
     moe_inter_dim = 768
 
 
+@dataclass
+class SmallerQwen30b:
+    n_routed_experts = 128
+    n_activated_experts = 8
+    dim = 32
+    moe_inter_dim = 32
+
+
 def get_expert_selection(
     B: int, model_config, seed: Optional[int]
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -769,18 +777,18 @@ def get_expert_selection(
         return (expert_indices, expert_counts)
 
 
-def run_hybrid_moe_gemm(tile_N: int, tile_F: int, group_size: int):
-    # ------------ Sim Conig ------------
-    simulate_rust = "timing"  # either "full", "timing", None
-    gold_check = False
+def run_hybrid_moe_gemm(
+    tile_N: int,
+    tile_F: int,
+    group_size: int,
+    input_tensor,
+    expert_indices,
+    model_config,
+    simulate_rust,  # either "full", "timing", None
+    gold_check,
+):
 
-    # ------------ Model Configuration ------------
-    # model_config = Qwen30b()
-    # model_config = SmallerMixtral()
-    model_config = SmallerDeepSeekV3()
-
-    # ------------ Batch Size ------------
-    B = 64
+    B = expert_indices.shape[0]
 
     # ------------ Group Size ------------
     GROUP_SIZE = group_size
@@ -799,19 +807,6 @@ def run_hybrid_moe_gemm(tile_N: int, tile_F: int, group_size: int):
     DOWN_COMPUTE_BW = 1022
     WEIGHT_SCALE_COMPUTE_BW = 1022
     ACCUM_COMPUTE_BW = 1022
-
-    # ------------ Input generation ------------
-    input_tensor = torch.randn(B, model_config.dim)
-
-    # ------------ Expert Indices ------------
-    # Set the random seed
-    seed = 5
-    torch.manual_seed(seed)
-
-    # expert_indices: [B, n_activated_experts]
-    # expert_counts: [n_routed_experts] (bincount across all batches)
-    expert_indices, expert_counts = get_expert_selection(B, model_config, seed)
-    print(f"Expert counts: {expert_counts}")
 
     # [B, n_routed_experts]
     expert_multihot = topk_to_multihot(expert_indices, model_config.n_routed_experts)
@@ -960,4 +955,44 @@ def run_hybrid_moe_gemm(tile_N: int, tile_F: int, group_size: int):
 
 
 def test_group_size_sweep():
-    run_hybrid_moe_gemm(tile_N=32, tile_F=32, group_size=2)
+    # ------------ Model Configuration ------------
+    # model_config = Qwen30b()
+    # model_config = SmallerMixtral()
+    # model_config = SmallerDeepSeekV3()
+    model_config = SmallerQwen30b()
+
+    iter = 1
+    layer = 16
+    expert_selection_file = f"/home/ginasohn/expert_routing/processed_qwen/continuous_batching_80gb_max4192_per_layer/iter_{iter:03d}_layer_{layer:03d}.npz"
+    expert_indices_npz = np.load(expert_selection_file)
+    expert_indices = torch.from_numpy(
+        expert_indices_npz["data"]
+    )  # [B, n_activated_experts]
+
+    B = expert_indices.shape[0]
+
+    # ------------ Input generation ------------
+    # Set the random seed
+    seed = 5
+    torch.manual_seed(seed)
+
+    input_tensor = torch.randn(B, model_config.dim)
+
+    # ------------ Expert Indices ------------
+    # expert_indices: [B, n_activated_experts]
+    # expert_counts: [n_routed_experts] (bincount across all batches)
+    expert_counts = torch.bincount(
+        expert_indices.flatten(), minlength=model_config.n_routed_experts
+    )
+    print(f"Expert counts: {expert_counts}")
+
+    run_hybrid_moe_gemm(
+        tile_N=16,
+        tile_F=16,
+        group_size=2,
+        input_tensor=input_tensor,
+        expert_indices=expert_indices,
+        model_config=model_config,
+        simulate_rust="full",
+        gold_check=True,
+    )
