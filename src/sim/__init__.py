@@ -22,6 +22,7 @@ class HBMConfig:
 @dataclass
 class SimConfig:
     channel_depth: Optional[int]
+    functional_sim: bool = True
 
 
 def simulate(
@@ -30,10 +31,9 @@ def simulate(
     hbm_config: HBMConfig,
     sim_config: SimConfig,
     protobuf_file: str,
-    functional: bool,  # whether to do the functional simulation or just do timing sim
     db_name: Optional[str] = None,
 ):
-    serialize(graph, protobuf_file, functional)
+    serialize(graph, protobuf_file, sim_config.functional_sim)
 
     result, cycles, duration_ms, duration_s = (
         step_perf.run_graph(  # pylint: disable=no-member

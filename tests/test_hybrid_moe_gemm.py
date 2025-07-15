@@ -641,7 +641,7 @@ def call_hybrid_moe_gemm(
 
     if simulate_rust in ["full", "timing"]:
         hbm_config = HBMConfig(64, 8, 2, 2, 1, 14)
-        sim_config = SimConfig(channel_depth=1)
+        sim_config = SimConfig(channel_depth=1, functional_sim=simulate_rust == "full")
 
         if logging is None:
             simulate(
@@ -650,7 +650,6 @@ def call_hybrid_moe_gemm(
                 hbm_config,
                 sim_config,
                 "/home/ginasohn/step_tl/graph.pb",
-                simulate_rust == "full",
             )
         else:
             assert isinstance(logging, str), "Logging must be a string path"
@@ -660,7 +659,6 @@ def call_hybrid_moe_gemm(
                 hbm_config,
                 sim_config,
                 "/home/ginasohn/step_tl/graph.pb",
-                simulate_rust == "full",
                 logging,
             )
 
@@ -688,11 +686,11 @@ class SmallerDeepSeekV3:
 
 
 @dataclass
-class SmallerMixtral:  # 32x scaled down version for each dimension
+class SmallerMixtral:  # 64x scaled down version for each dimension
     n_routed_experts = 8
     n_activated_experts = 2
-    dim = 128  # 4096/32
-    moe_inter_dim = 448  # 14336/32 (Can use tile size upto 64)
+    dim = 64  # 4096/64
+    moe_inter_dim = 224  # 14336/64 (Can use tile size upto 32)
 
 
 @dataclass
@@ -701,6 +699,14 @@ class Mixtral8x7b:
     n_activated_experts = 2
     dim = 4096
     moe_inter_dim = 14336
+
+
+@dataclass
+class Qwen30b:
+    n_routed_experts = 128
+    n_activated_experts = 8
+    dim = 4096
+    moe_inter_dim = 768
 
 
 def get_expert_selection(
@@ -765,11 +771,13 @@ def get_expert_selection(
 
 def run_hybrid_moe_gemm(tile_N: int, tile_F: int, group_size: int):
     # ------------ Sim Conig ------------
-    simulate_rust = "timing"  # either "full", "timing", "none"
+    simulate_rust = "timing"  # either "full", "timing", None
     gold_check = False
 
     # ------------ Model Configuration ------------
-    model_config = DeepSeekV316B()
+    # model_config = Qwen30b()
+    # model_config = SmallerMixtral()
+    model_config = SmallerDeepSeekV3()
 
     # ------------ Batch Size ------------
     B = 64

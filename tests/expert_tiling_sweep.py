@@ -511,17 +511,19 @@ def test_expert_tiling_sweep_single_schedule():
 
     # ------------ Sim Conig ------------
     # simulate_mode = "full"
-    simulate_mode = "full"
+    simulate_mode = "timing"
     # simulate_mode = None
 
-    check_gold = True
+    check_gold = False
 
     logging = False
 
     par_dispatch = 4
 
     tiling_schedule_name = "mn_mk"
-    csv_filename = f"expert_tiling_sweep_{tiling_schedule_name}_qwen30b_full.csv"
+    csv_filename = (
+        f"expert_tiling_sweep_{tiling_schedule_name}_qwen30b_{simulate_mode}.csv"
+    )
 
     # ------------ Model Configuration ------------
     model_config = Qwen30b()
@@ -725,7 +727,9 @@ def test_expert_tiling_sweep_single_schedule():
             n_channel = 8
             channel_depth = 1
             hbm_config = HBMConfig(64, n_channel, 2, 2, 1, 14)
-            sim_config = SimConfig(channel_depth=channel_depth)
+            sim_config = SimConfig(
+                channel_depth=channel_depth, functional_sim=simulate_mode == "full"
+            )
 
             result_metrics.mem_bw = n_channel * 32  # 32 bytes/cycle per channel
             result_metrics.channel_depth = channel_depth
@@ -748,7 +752,6 @@ def test_expert_tiling_sweep_single_schedule():
                     hbm_config,
                     sim_config,
                     "/home/ginasohn/step_tl/graph.pb",
-                    simulate_mode == "full",
                 )
             else:
                 cycles, duration_ms, duration_s = simulate(
@@ -757,7 +760,6 @@ def test_expert_tiling_sweep_single_schedule():
                     hbm_config,
                     sim_config,
                     "/home/ginasohn/step_tl/graph.pb",
-                    simulate_mode == "full",
                     f"expert_{tiling_schedule_name}_{tile_m}_{tile_k}_{tile_n}_{tile_n_down}",
                 )
 
