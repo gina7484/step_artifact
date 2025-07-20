@@ -2,7 +2,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 import torch
 from typing import List, Tuple, Union
-from step_py.datatype import MultiHot, Index, Stream
+from step_py.datatype import MultiHot, Index, Stream, Tile, Uint32
 from step_py.ops import StepOps, get_stream
 from networkx import MultiDiGraph
 
@@ -132,6 +132,65 @@ class SelectGen(StepOps):
         self.underlying = tensor
 
         dtype = MultiHot(n) if is_multihot else Index(n)
+        self._stream = Stream(stream_dtype=dtype, shape=(1,) + tuple(tensor.shape[:-1]))
+
+    @property
+    def stream(self) -> Stream:
+        """The stream of the operation."""
+        return self._stream
+
+    @property
+    def stream_list(self) -> List[Stream]:
+        return [self._stream]
+
+    @property
+    def input(self) -> Union["StepOps", Tuple["StepOps", int]]:
+        raise NotImplementedError(
+            "Shouldn't be called for nodes that doesn't have an input stream"
+        )
+
+    @property
+    def input_list(self) -> List[Union["StepOps", Tuple["StepOps", int]]]:
+        raise NotImplementedError(
+            "Shouldn't be called for nodes that doesn't have an input stream"
+        )
+
+    def stream_idx(self, idx: int) -> Stream:
+        raise NotImplementedError(
+            "Shouldn't be called for nodes that only have a single output stream"
+        )
+
+    def __str__(self):
+        cls = self.__class__.__name__
+        return f"{cls}_{self.instance_id}"
+
+    def replace_input(
+        self,
+        org_input: Union["StepOps", Tuple["StepOps", int]],
+        new_input: Union["StepOps", Tuple["StepOps", int]],
+    ):
+        raise NotImplementedError(
+            "Shouldn't be called for nodes that doesn't have an input stream"
+        )
+
+    def off_chip_traffic(self) -> int:
+        """Return the off-chip traffic for this operation."""
+        return 0
+
+    def on_chip_requirement(self, count_fifos: bool = False) -> int:
+        """Return the on-chip memory requirement for this operation."""
+        return 0
+
+
+class AddrGen(StepOps):
+    underlying: torch.Tensor
+    _stream: Stream
+
+    def __init__(self, tensor: torch.Tensor):
+        super().__init__()
+        self.underlying = tensor
+
+        dtype = Tile(Uint32(), (1, 1))
         self._stream = Stream(stream_dtype=dtype, shape=(1,) + tuple(tensor.shape[:-1]))
 
     @property

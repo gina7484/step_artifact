@@ -260,6 +260,44 @@ def serialize(graph: MultiDiGraph, protobuf_file: str, functional: bool):
                 print(f"Saved {str(op)} data to {file_path}")
 
             operator.dyn_off_chip_load.CopyFrom(dyn_offchipload_pb)
+        elif isinstance(op, IndexedOffChip):
+            indexedoffchip_pb = ops_pb2.IndexedOffChip()
+
+            if isinstance(op.raddr, Tuple):
+                raddr_node, idx = op.raddr
+                indexedoffchip_pb.raddr_stream_idx = idx
+                indexedoffchip_pb.raddr_id = raddr_node.instance_id
+            elif isinstance(op.raddr, StepOps):
+                indexedoffchip_pb.raddr_id = op.raddr.instance_id
+
+            if isinstance(op.waddr, Tuple):
+                waddr_node, idx = op.waddr
+                indexedoffchip_pb.waddr_stream_idx = idx
+                indexedoffchip_pb.waddr_id = waddr_node.instance_id
+            elif isinstance(op.waddr, StepOps):
+                indexedoffchip_pb.waddr_id = op.waddr.instance_id
+
+            if isinstance(op.wdata, Tuple):
+                wdata_node, idx = op.wdata
+                indexedoffchip_pb.wdata_stream_idx = idx
+                indexedoffchip_pb.wdata_id = wdata_node.instance_id
+            elif isinstance(op.wdata, StepOps):
+                indexedoffchip_pb.wdata_id = op.wdata.instance_id
+
+            indexedoffchip_pb.tile_row = op.tile_row
+            indexedoffchip_pb.tile_col = op.tile_col
+            indexedoffchip_pb.n_byte = op.n_byte
+            indexedoffchip_pb.par_dispatch = op.par_dispatch
+
+            indexedoffchip_pb.dtype.CopyFrom(to_pb_datatype(op.stream.stream_dtype))
+
+            if functional:
+                file_path = f"{str(op)}.npy"
+                indexedoffchip_pb.npy_path = file_path
+                np.save(file_path, op.underlying.detach().numpy())
+                print(f"Saved {str(op)} data to {file_path}")
+
+            operator.indexed_off_chip.CopyFrom(indexedoffchip_pb)
         elif isinstance(op, BinaryMap):
             binarymap_pb = ops_pb2.BinaryMap()
 
@@ -638,6 +676,15 @@ def serialize(graph: MultiDiGraph, protobuf_file: str, functional: bool):
             print(f"Saved {str(op)} data to {file_path}")
 
             operator.select_gen.CopyFrom(selectgen_pb)
+        elif isinstance(op, AddrGen):
+            addrgen_pb = ops_pb2.AddrGen()
+
+            file_path = f"{str(op)}.npy"
+            addrgen_pb.npy_path = file_path
+            np.save(file_path, op.underlying.detach().numpy())
+            print(f"Saved {str(op)} data to {file_path}")
+
+            operator.addr_gen.CopyFrom(addrgen_pb)
         elif isinstance(op, PrinterContext):
             printercontext_pb = ops_pb2.PrinterContext()
 

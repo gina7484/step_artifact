@@ -80,6 +80,162 @@ class StepOps(ABC):
         pass
 
 
+class IndexedOffChip(StepOps):
+    """
+    Used to load a tensor from off-chip memory.
+    This can express cases where the memory's size is not known at compile time.
+    (e.g., KV cache, batched input)
+    This can also be used for accessing memory that requires random access.
+
+    Restrictions:
+    - waddr and wdata has to have the same shape
+    - wdata has to be the same tile shape as the given tile shape
+    """
+
+    raddr: Union[StepOps, Tuple[StepOps, int]]
+    waddr: Union[StepOps, Tuple[StepOps, int]]
+    wdata: Union[StepOps, Tuple[StepOps, int]]
+    underlying: torch.Tensor
+    tile_row: int
+    tile_col: int
+    n_byte: int
+    par_dispatch: int
+    _stream: Stream
+
+    def __init__(
+        self,
+        graph: MultiDiGraph,
+        underlying: torch.Tensor,
+        tile_row: int,
+        tile_col: int,
+        par_dispatch: int,
+        raddr: Optional[Union[StepOps, Tuple[StepOps, int]]] = None,
+        waddr: Optional[Union[StepOps, Tuple[StepOps, int]]] = None,
+        wdata: Optional[Union[StepOps, Tuple[StepOps, int]]] = None,
+        mock_bf16: bool = False,
+    ):
+        assert raddr is not None or (waddr is not None and wdata is not None)
+
+        super().__init__()
+
+        self.underlying = underlying
+
+        self.raddr = raddr
+        self.waddr = waddr
+        self.wdata = wdata
+
+        self.tile_row = tile_row
+        self.tile_col = tile_col
+        self.par_dispatch = par_dispatch
+
+        if raddr is not None:
+            ref_node = raddr if isinstance(raddr, StepOps) else raddr[0]
+            graph.add_edge(ref_node, self)
+        if waddr is not None:
+            ref_node = waddr if isinstance(waddr, StepOps) else waddr[0]
+            graph.add_edge(ref_node, self)
+        if wdata is not None:
+            ref_node = wdata if isinstance(wdata, StepOps) else wdata[0]
+            graph.add_edge(ref_node, self)
+
+        raddr_stream: Stream = get_stream(raddr)
+        if underlying.dtype == torch.float32:
+            if mock_bf16:
+                self.n_byte = 2  # we will use this to mimic bfloat16
+            else:
+                self.n_byte = 4
+
+            stream_dtype = Tile(
+                tile_dtype=Float32(),
+                shape=(tile_row, tile_col),
+            )
+            stream_shape = ()
+            if raddr is not None:
+                raddr_stream = get_stream(raddr)
+                stream_shape = raddr_stream.shape
+            self._stream = Stream(stream_dtype=stream_dtype, shape=stream_shape)
+        elif underlying.dtype == torch.float16:
+            self.n_byte = 2
+
+            stream_dtype = Tile(
+                tile_dtype=Float16(),
+                shape=(tile_row, tile_col),
+            )
+            stream_shape = ()
+            if raddr is not None:
+                raddr_stream = get_stream(raddr)
+                stream_shape = raddr_stream.shape
+            self._stream = Stream(stream_dtype=stream_dtype, shape=stream_shape)
+        else:
+            raise ValueError(f"Unsupported dtype: {underlying.dtype}")
+
+    @property
+    def stream(self) -> Stream:
+        """The stream of the operation."""
+        return self._stream
+
+    @property
+    def stream_list(self) -> List[Stream]:
+        return [self._stream]
+
+    @property
+    def input(self) -> Union["StepOps", Tuple["StepOps", int]]:
+        raise NotImplementedError(
+            "Shouldn't be called for nodes that doesn't have an input stream"
+        )
+
+    @property
+    def input_list(self) -> List[Union["StepOps", Tuple["StepOps", int]]]:
+        return [self.raddr, self.waddr, self.wdata]
+
+    def stream_idx(self, idx: int) -> Stream:
+        raise NotImplementedError(
+            "Shouldn't be called for nodes that only have a single output stream"
+        )
+
+    def __str__(self):
+        cls = self.__class__.__name__
+        return f"{cls}_{self.instance_id}"
+
+    def replace_input(
+        self,
+        org_input: Union["StepOps", Tuple["StepOps", int]],
+        new_input: Union["StepOps", Tuple["StepOps", int]],
+    ):
+        if self.raddr == org_input:
+            if get_stream(self.raddr) != get_stream(new_input):
+                raise ValueError("The shape of the input stream shouldn't change")
+            self.raddr = new_input
+        elif self.waddr == org_input:
+            if get_stream(self.waddr) != get_stream(new_input):
+                raise ValueError("The shape of the input stream shouldn't change")
+            self.waddr = new_input
+        elif self.wdata == org_input:
+            if get_stream(self.wdata) != get_stream(new_input):
+                raise ValueError("The shape of the input stream shouldn't change")
+            self.wdata = new_input
+        else:
+            raise ValueError("Wrong org_input")
+
+    def off_chip_traffic(self) -> sympy.Expr:
+        """Return the off-chip traffic for this operation."""
+        read_traffic = self._stream.total_elements() * sympy.Integer(
+            self.tile_row * self.tile_col * self.n_byte
+        )
+        write_traffic = self.wdata.total_elements() * sympy.Integer(
+            self.tile_row * self.tile_col * self.n_byte
+        )
+        return sympy.simplify(sympy.Add(read_traffic, write_traffic))
+
+    def on_chip_requirement(self, count_fifos: bool = False) -> sympy.Expr:
+        """Return the on-chip memory requirement for this operation."""
+        staging_area = sympy.Integer(self.tile_row * self.tile_col * self.n_byte)
+        read_on_chip = sympy.Integer(0) if self.raddr is None else staging_area
+        write_on_chip = sympy.Integer(0) if self.wdata is None else staging_area
+
+        return sympy.simplify(sympy.Add(read_on_chip, write_on_chip))
+
+
 class OffChipLoad(StepOps):
     underlying: torch.Tensor
     tensor_shape_tiled: Tuple[int, ...]
@@ -99,6 +255,7 @@ class OffChipLoad(StepOps):
         tile_row: int,
         tile_col: int,
         par_dispatch: int,
+        mock_bf16: bool = False,
     ):
         super().__init__()
 
@@ -117,7 +274,10 @@ class OffChipLoad(StepOps):
         self.par_dispatch = par_dispatch
 
         if underlying.dtype == torch.float32:
-            self.n_byte = 4
+            if mock_bf16:
+                self.n_byte = 2  # we will use this to mimic bfloat16
+            else:
+                self.n_byte = 4
 
             stream_dtype = Tile(
                 tile_dtype=Float32(),
@@ -183,7 +343,7 @@ class OffChipLoad(StepOps):
         total_elements = self._stream.total_elements() * sympy.Integer(
             self.tile_row * self.tile_col * self.n_byte
         )
-        return sympy.simplify(sympy.Mul(total_elements, sympy.Integer(self.n_byte)))
+        return sympy.simplify(total_elements)
 
     def on_chip_requirement(self, count_fifos: bool = False) -> sympy.Expr:
         """Return the on-chip memory requirement for this operation."""
@@ -212,6 +372,7 @@ class DynOffChipLoad(StepOps):
         tile_row: int,
         tile_col: int,
         par_dispatch: int,
+        mock_bf16: bool = False,
     ):
         super().__init__()
 
@@ -235,7 +396,10 @@ class DynOffChipLoad(StepOps):
 
         ref_stream: Stream = get_stream(ref)
         if underlying.dtype == torch.float32:
-            self.n_byte = 4
+            if mock_bf16:
+                self.n_byte = 2  # we will use this to mimic bfloat16
+            else:
+                self.n_byte = 4
 
             stream_dtype = Tile(
                 tile_dtype=Float32(),
@@ -297,7 +461,7 @@ class DynOffChipLoad(StepOps):
         total_elements = self._stream.total_elements() * sympy.Integer(
             self.tile_row * self.tile_col * self.n_byte
         )
-        return sympy.simplify(sympy.Mul(total_elements, sympy.Integer(self.n_byte)))
+        return sympy.simplify(total_elements)
 
     def on_chip_requirement(self, count_fifos: bool = False) -> sympy.Expr:
         """Return the on-chip memory requirement for this operation."""
@@ -1263,9 +1427,11 @@ class FlatPartition(StepOps):
 
         in_stream: Stream = get_stream(input)
         # [Genghan] A trick: StepOps should use the same control_node to align the outermost dimension
-        new_names = sympy.symbols(
-            f"{str(control_node)}_0:{num_consumers}", integer=True, positive=True
-        )
+        new_names = [
+            sympy.Symbol(f"{str(control_node)}_{i:03d}", integer=True, positive=True)
+            for i in range(num_consumers)
+        ]
+
         self._stream = [
             Stream(
                 stream_dtype=in_stream.stream_dtype,

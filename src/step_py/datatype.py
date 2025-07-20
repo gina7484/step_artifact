@@ -42,6 +42,20 @@ class Float32(ElementTP):
         return "Float32"
 
 
+class Uint32(ElementTP):
+    def __eq__(self, value):
+        if isinstance(value, Uint32):
+            return True
+        return False
+
+    def size_in_bytes(self) -> sympy.Expr:
+        """Return the size of Uint32 in bytes."""
+        return sympy.Integer(4)
+
+    def __str__(self) -> str:
+        return "Uint32"
+
+
 @dataclass
 class DynTile:
     tile_dtype: ElementTP
