@@ -658,6 +658,7 @@ def run_ws_tile_mn_mk(
     simulate_rust,  # either "full", "timing", None
     gold_check,
     mock_bf16: bool = False,
+    logging: Optional[str] = None,
 ):
 
     B = expert_indices.shape[0]
@@ -744,7 +745,7 @@ def run_ws_tile_mn_mk(
         save_graph=False,
         simulate_rust=simulate_rust,
         mock_bf16=mock_bf16,
-        # logging="expert_par_gemm_reshape",
+        logging=logging,
     )
 
     if simulate_rust and gold_check:

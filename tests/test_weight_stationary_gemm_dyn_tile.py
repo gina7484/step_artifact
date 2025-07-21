@@ -14,12 +14,6 @@ from utils.draw_graph import save_graph_format
 from rewrite.broadcast import infer_broadcast
 from utils.moe import *
 
-# To round to the closest multiple of 16
-# Reshape by 16
-# Promote
-# Flatten
-# Accum Tile
-
 
 def ws_tile_mn_mk_gemm_reshape_dyn_tile(
     step_graph: MultiDiGraph,
@@ -114,7 +108,9 @@ def ws_tile_mn_mk_gemm_reshape_dyn_tile(
     )
 
     # - input stream shape: [Dyn] x n_routed_experts (tile: [1, D])
-    # - output stream: [((Dyn + round_N -1) // round_N) * round_N] x n_routed_experts (tile: [1, D])
+    # - output stream:
+    #   - after reshape: [1, ((Dyn + round_N -1) // round_N),  round_N] x n_routed_experts (tile: [1, D])
+    #   - after flatten: [1, ((Dyn + round_N -1) // round_N) * round_N] x n_routed_experts (tile: [1, D])
     round_to_16 = [
         Flatten(
             step_graph,
@@ -124,23 +120,13 @@ def ws_tile_mn_mk_gemm_reshape_dyn_tile(
                 round_N,
                 0,
                 write_back_mu=False,
+                add_outer_dim=True,
                 pad_fn=init_fn.Zero(shape=(1, D), dtype=Float32()),
             ),
             min_rank=0,
             max_rank=1,
         )
         for i in range(model_config.n_routed_experts)
-    ]
-
-    # - input stream shape: [((Dyn + round_N -1) // round_N) * round_N] x n_routed_experts (tile: [1, D])
-    # - output stream: [1, ((Dyn + round_N -1) // round_N) * round_N] x n_routed_experts (tile: [1, D])
-    promote_rouned_stream = [
-        Promote(
-            step_graph,
-            stream_i,
-            1,
-        )
-        for stream_i in round_to_16
     ]
 
     # - input stream shape: [1, ((Dyn + round_N -1) // round_N) * round_N] x n_routed_experts (tile: [1, D])
@@ -158,7 +144,7 @@ def ws_tile_mn_mk_gemm_reshape_dyn_tile(
             False,
             1024,
         )
-        for stream_i in promote_rouned_stream
+        for stream_i in round_to_16
     ]
 
     # ------------ Stage 5: Repeat input features ------------
@@ -167,10 +153,10 @@ def ws_tile_mn_mk_gemm_reshape_dyn_tile(
     repeated_feature_streams = [
         RepeatStatic(
             step_graph,
-            stream_i,
+            expert_feature_streams[i],
             repeat_factor=F // tile_F,
         )
-        for stream_i in expert_feature_streams
+        for i in range(model_config.n_routed_experts)
     ]
 
     # ------------ Stage 6: Load up parameters ------------
@@ -178,7 +164,9 @@ def ws_tile_mn_mk_gemm_reshape_dyn_tile(
     # - tensor shape: [D, F]
     # - output stream shape:  [1, F // tile_F, 1] (tile: [D, tile_F])
     up_loads = [
-        OffChipLoad(
+        DynOffChipLoad(
+            graph=step_graph,
+            ref=expert_feature_streams[i],
             underlying=w_up_list[i],
             stride=(1, D // D),
             out_shape_tiled=(F // tile_F, 1),
@@ -223,7 +211,9 @@ def ws_tile_mn_mk_gemm_reshape_dyn_tile(
     # - tensor shape: [D, F]
     # - output stream shape: [1, F // tile_F, 1] (tile: [D, tile_F])
     gate_loads = [
-        OffChipLoad(
+        DynOffChipLoad(
+            graph=step_graph,
+            ref=expert_feature_streams[i],
             underlying=w_gate_list[i],
             stride=(1, D // D),
             out_shape_tiled=(F // tile_F, 1),
@@ -295,7 +285,9 @@ def ws_tile_mn_mk_gemm_reshape_dyn_tile(
     # - per tensor stream shape: [F // tile_F, 1] (tile: [tile_F, D])
     # - output stream shape: [1, F // tile_F, 1] (tile: [tile_F, D])
     down_loads = [
-        OffChipLoad(
+        DynOffChipLoad(
+            graph=step_graph,
+            ref=expert_feature_streams[i],
             underlying=w_down_list[i],
             stride=(D // D, 1),
             out_shape_tiled=(F // tile_F, D // D),
@@ -419,10 +411,12 @@ def ws_tile_mn_mk_gemm_reshape_dyn_tile(
     # ------------ Stage 17: Store the output ------------
     output = OffChipStore(
         step_graph,
-        Promote(
+        Reshape(
             graph=step_graph,
             input=accumed_stream,
-            promote_rank=0,
+            chunk_size=1,
+            reshape_rank=0,
+            write_back_mu=True,
         ),
         par_dispatch=4,
         store_file_name="output",
@@ -509,7 +503,9 @@ def call_ws_tile_mn_mk_gemm_reshape_dyn_tile(
 
     if simulate_rust in ["full", "timing"]:
         hbm_config = HBMConfig(64, 8, 2, 2, 1, 14)
-        sim_config = SimConfig(channel_depth=1, functional_sim=simulate_rust == "full")
+        sim_config = SimConfig(
+            channel_depth=1, functional_sim=simulate_rust == "full", mock_bf16=mock_bf16
+        )
 
         if logging is None:
             cycles, duration_ms, duration_s = simulate(
@@ -548,6 +544,7 @@ def run_ws_tile_mn_mk_dyn_tile(
     simulate_rust,  # either "full", "timing", None
     gold_check,
     mock_bf16: bool = False,
+    logging: Optional[str] = None,
 ):
 
     B = expert_indices.shape[0]
@@ -634,7 +631,7 @@ def run_ws_tile_mn_mk_dyn_tile(
         save_graph=False,
         simulate_rust=simulate_rust,
         mock_bf16=mock_bf16,
-        # logging="expert_par_gemm_reshape",
+        logging=logging,
     )
 
     if simulate_rust and gold_check:

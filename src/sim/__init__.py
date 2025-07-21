@@ -36,17 +36,16 @@ def simulate(
 ):
     serialize(graph, protobuf_file, sim_config.functional_sim)
 
-    return 0, 0, 0
-    # result, cycles, duration_ms, duration_s = (
-    #     step_perf.run_graph(  # pylint: disable=no-member
-    #         protobuf_file, logging, hbm_config, sim_config, db_name
-    #     )
-    # )
-    # print(f"Result: {result}")
-    # print(f"Cycles: {cycles}")
-    # print(f"Duration: {duration_ms} ms, {duration_s} s")
+    result, cycles, duration_ms, duration_s = (
+        step_perf.run_graph(  # pylint: disable=no-member
+            protobuf_file, logging, hbm_config, sim_config, db_name
+        )
+    )
+    print(f"Result: {result}")
+    print(f"Cycles: {cycles}")
+    print(f"Duration: {duration_ms} ms, {duration_s} s")
 
-    # return cycles, duration_ms, duration_s
+    return cycles, duration_ms, duration_s
 
 
 # pylint: disable=no-member
@@ -651,6 +650,8 @@ def serialize(graph: MultiDiGraph, protobuf_file: str, functional: bool):
             reshape_pb.chunk_size = op.chunk_size
             reshape_pb.dtype.CopyFrom(to_pb_datatype(op.stream.stream_dtype))
             reshape_pb.write_back_mu = op.write_back_mu
+            reshape_pb.add_outer_dim = op.add_outer_dim
+            reshape_pb.input_stream_rank = op.input_stream_rank
 
             if op.pad_fn is not None:
                 reshape_pb.pad_func.CopyFrom(to_pb_init_func(op.pad_fn))

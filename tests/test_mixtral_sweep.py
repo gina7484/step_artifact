@@ -85,6 +85,7 @@ def test_gemm_sweep():
                     "timing",
                     False,
                     mock_bf16,
+                    # logging=f"expert_par_gemm_n{tile_N}_f{tile_F}",
                 )
             )
 
@@ -181,8 +182,8 @@ def test_gemm_sweep():
 def test_gemm_dyn_tile():
     mock_bf16 = True
     # ------------ Model Configuration ------------
-    # model_config = SmallerMixtral()
-    model_config = TinyMixtral()
+    model_config = SmallerMixtral()
+    # model_config = TinyMixtral()
 
     # tile_Ns = [64]  # For the batch dim (64)
     round_N = 16
@@ -225,6 +226,7 @@ def test_gemm_dyn_tile():
                 "timing",  # "full",
                 False,
                 mock_bf16,
+                # logging=f"expert_par_gemm_dyn_tile_round_{round_N}_f{tile_F}",
             )
         )
 
@@ -288,28 +290,28 @@ def test_gemm_dyn_tile():
         print(dict_to_append)
         results.append(dict_to_append)
 
-        # out_file = f"mixtral_{model_config.dim}_{model_config.moe_inter_dim}_round_{round_N}_iter{iter:03d}_layer_{layer:03d}_n_dyn_f{tile_F}.csv"
-        # try:
-        #     with open(out_file, "w", newline="", encoding="utf-8") as csvfile:
-        #         fieldnames = [
-        #             "batch",
-        #             "tile_N",
-        #             "tile_F",
-        #             "flops",
-        #             "padded_flops",
-        #             "cycles",
-        #             "duration_s",
-        #             "off_chip_traffic_bytes",
-        #             "on_chip_requirement_bytes",
-        #         ]
-        #         writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+        out_file = f"mixtral_{model_config.dim}_{model_config.moe_inter_dim}_round_{round_N}_iter{iter:03d}_layer_{layer:03d}_n_dyn_f{tile_F}.csv"
+        try:
+            with open(out_file, "w", newline="", encoding="utf-8") as csvfile:
+                fieldnames = [
+                    "batch",
+                    "round_N",
+                    "tile_F",
+                    "flops",
+                    "padded_flops",
+                    "cycles",
+                    "duration_s",
+                    "off_chip_traffic_bytes",
+                    "on_chip_requirement_bytes",
+                ]
+                writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
 
-        #         writer.writeheader()
+                writer.writeheader()
 
-        #         # Write data rows
-        #         for result in results:
-        #             writer.writerow(result)
+                # Write data rows
+                for result in results:
+                    writer.writerow(result)
 
-        #     print(f"Results written to {out_file}")
-        # except Exception as e:
-        #     print(f"Error writing CSV file: {e}")
+            print(f"Results written to {out_file}")
+        except Exception as e:
+            print(f"Error writing CSV file: {e}")

@@ -2076,6 +2076,8 @@ class Reshape(StepOps):
     reshape_rank: int
     pad_fn: Optional[InitFn]
     write_back_mu: bool
+    input_stream_rank: int
+    add_outer_dim: bool
     _stream: Stream
 
     def __init__(
@@ -2085,6 +2087,7 @@ class Reshape(StepOps):
         chunk_size: int,
         reshape_rank: int,
         write_back_mu: bool,
+        add_outer_dim: bool = False,
         pad_fn: Optional[InitFn] = None,
     ):
         super().__init__()
@@ -2095,11 +2098,18 @@ class Reshape(StepOps):
         self.write_back_mu = write_back_mu
 
         in_stream: Stream = get_stream(input)
+        self.input_stream_rank = in_stream.rank
         assert (
             reshape_rank > 0 and in_stream.shape[reshape_rank] % chunk_size == 0
         ) or (
             reshape_rank == 0 and (pad_fn is not None or chunk_size == 1)
         ), "The chunk size must be a divisor of the shape at the reshape rank if the rank being split is not the innermost"
+
+        if add_outer_dim:
+            assert (
+                in_stream.rank == 0
+            ), "Input stream rank must be 0 if add_outer_dim is True"
+        self.add_outer_dim = add_outer_dim
 
         assert (
             reshape_rank >= 0 and reshape_rank <= in_stream.rank
@@ -2107,13 +2117,24 @@ class Reshape(StepOps):
 
         rank_pos = in_stream.rank - reshape_rank
         if isinstance(in_stream.shape[rank_pos], DynDim):
-            self._stream = Stream(
-                stream_dtype=in_stream.stream_dtype,
-                shape=in_stream.shape[:rank_pos]
-                + ((in_stream.shape[rank_pos] + chunk_size - 1) // chunk_size,)
-                + (chunk_size,)
-                + in_stream.shape[(rank_pos + 1) :],
-            )
+            if add_outer_dim:  # this means in_stream.rank == 0
+                self._stream = Stream(
+                    stream_dtype=in_stream.stream_dtype,
+                    shape=(1,)
+                    + in_stream.shape[:rank_pos]
+                    + ((in_stream.shape[rank_pos] + chunk_size - 1) // chunk_size,)
+                    + (chunk_size,)
+                    + in_stream.shape[(rank_pos + 1) :],
+                )
+
+            else:
+                self._stream = Stream(
+                    stream_dtype=in_stream.stream_dtype,
+                    shape=in_stream.shape[:rank_pos]
+                    + ((in_stream.shape[rank_pos] + chunk_size - 1) // chunk_size,)
+                    + (chunk_size,)
+                    + in_stream.shape[(rank_pos + 1) :],
+                )
         elif isinstance(in_stream.shape[rank_pos], int):
             self._stream = Stream(
                 stream_dtype=in_stream.stream_dtype,
