@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
 from typing import Tuple
-from step_py.datatype import Tile, MultiHot, Index
+from step_py.datatype import DynTile, Tile, MultiHot, Index
 
 
 class AccumFn(ABC):
@@ -105,10 +105,7 @@ class RetileRow(AccumFn):
     def apply(self, input_tp: Tuple) -> Tile:
         in_tile, accum_tile = input_tp[0], input_tp[1]
 
-        if not (isinstance(in_tile, Tile) and isinstance(accum_tile, Tile)):
+        if not (isinstance(in_tile, Tile) and isinstance(accum_tile, (Tile, DynTile))):
             raise TypeError("Both inputs must be of type Tile.")
         assert in_tile.shape[1] == accum_tile.shape[1]
-        return Tile(
-            tile_dtype=in_tile.tile_dtype,
-            shape=(in_tile.shape[0] + accum_tile.shape[0], accum_tile.shape[1]),
-        )
+        return accum_tile

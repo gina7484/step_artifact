@@ -5,6 +5,7 @@ from step_py.kernels.linear import LinearTileConfig
 from step_py.utility_ops import *
 from step_py.ops import *
 import numpy as np
+import csv
 from sim import SimConfig, simulate, HBMConfig
 from step_py.functions import map_accum_fn, map_fn, init_fn, accum_fn
 from utils.gold_checking import check_gold_tensor
@@ -590,7 +591,7 @@ def call_hybrid_moe_gemm(
     save_graph: bool,
     simulate_rust: str,
     logging: Optional[str] = None,
-) -> tuple[StepOps, sympy.Expr, sympy.Expr]:
+) -> tuple[StepOps, sympy.Expr, sympy.Expr, int, int]:
     step_graph = MultiDiGraph()
 
     output: OffChipStore = hybrid_moe_gemm(
@@ -639,12 +640,16 @@ def call_hybrid_moe_gemm(
         else:
             raise ValueError(f"Node {node} in the graph is not a StepOps")
 
+    cycles = 0
+    duration_ms = 0
+    duration_s = 0
+
     if simulate_rust in ["full", "timing"]:
         hbm_config = HBMConfig(64, 8, 2, 2, 1, 14)
         sim_config = SimConfig(channel_depth=1, functional_sim=simulate_rust == "full")
 
         if logging is None:
-            simulate(
+            cycles, duration_ms, duration_s = simulate(
                 step_graph,
                 False,  # logging
                 hbm_config,
@@ -653,7 +658,7 @@ def call_hybrid_moe_gemm(
             )
         else:
             assert isinstance(logging, str), "Logging must be a string path"
-            simulate(
+            cycles, duration_ms, duration_s = simulate(
                 step_graph,
                 True,  # logging
                 hbm_config,
@@ -666,6 +671,8 @@ def call_hybrid_moe_gemm(
         output,
         sympy.simplify(total_off_chip_traffic),
         sympy.simplify(total_on_chip_requirement),
+        cycles,
+        duration_s,
     )
 
 
@@ -705,16 +712,18 @@ class Mixtral8x7b:
 class Qwen30b:
     n_routed_experts = 128
     n_activated_experts = 8
-    dim = 4096
-    moe_inter_dim = 768
+    dim = 2048  # https://huggingface.co/Qwen/Qwen3-30B-A3B/blob/main/config.json#L12
+    moe_inter_dim = (
+        768  # https://huggingface.co/Qwen/Qwen3-30B-A3B/blob/main/config.json#L19
+    )
 
 
 @dataclass
 class SmallerQwen30b:
     n_routed_experts = 128
     n_activated_experts = 8
-    dim = 32
-    moe_inter_dim = 32
+    dim = 256
+    moe_inter_dim = 48
 
 
 def get_expert_selection(
@@ -851,7 +860,7 @@ def run_hybrid_moe_gemm(
     off_chip_traffic: sympy.Expr
     on_chip_requirement: sympy.Expr
 
-    output, off_chip_traffic, on_chip_requirement = call_hybrid_moe_gemm(  # type: ignore (Cannot infer type of output properly)
+    output, off_chip_traffic, on_chip_requirement, cycles, duration_s = call_hybrid_moe_gemm(  # type: ignore (Cannot infer type of output properly)
         model_config=model_config,
         batch=B,
         gate_compute_bw=GATE_COMPUTE_BW * GROUP_SIZE,
@@ -889,69 +898,7 @@ def run_hybrid_moe_gemm(
 
         check_gold_tensor(output.store_file_name, final_gold)
 
-    # ------------ substitue symbols in the off_chip_traffic and on_chip_requirement ------------
-    # print(f"\n\n=================== CONFIG ===================")
-    # print(f"Batch size: {B}")
-    # print(f"Model config: {model_config}")
-    # print(f"Tile F: {tile_F}")
-    # print(f"Tile N: {tile_N}")
-    # print(f"Group size: {GROUP_SIZE}")
-
-    # num_tiles = [
-    #     (routed_toks + tile_N - 1) // tile_N for routed_toks in expert_counts.tolist()
-    # ]
-
-    # after_pad_batch_dim = [num_tiles_i * tile_N for num_tiles_i in num_tiles]
-
-    # padded_rows = [
-    #     total_toks - raw_toks
-    #     for total_toks, raw_toks in zip(after_pad_batch_dim, expert_counts.tolist())
-    # ]
-
-    # print(f"Padded rows: {padded_rows}")
-
-    # flops = sum(
-    #     [
-    #         (
-    #             2 * b * model_config.dim * model_config.moe_inter_dim * 3
-    #         )  # 3 (Linear layers)
-    #         + b * model_config.moe_inter_dim  # 1 (Element-wise mult)
-    #         + (
-    #             8 * b * model_config.dim * model_config.moe_inter_dim
-    #         )  # silu_flops: 1(neg)+4(exp)+1(add)+1(div)+1(mul)= 8 FLOPs per element
-    #         for b in after_pad_batch_dim
-    #     ]
-    # )
-
-    # print(f"Total flops: {flops}")
-
-    # padded_flops = sum(
-    #     [
-    #         (
-    #             2 * b * model_config.dim * model_config.moe_inter_dim * 3
-    #         )  # 3 (Linear layers)
-    #         + b * model_config.moe_inter_dim  # 1 (Element-wise mult)
-    #         + (
-    #             8 * b * model_config.dim * model_config.moe_inter_dim
-    #         )  # silu_flops: 1(neg)+4(exp)+1(add)+1(div)+1(mul)= 8 FLOPs per element
-    #         for b in padded_rows
-    #     ]
-    # )
-
-    # print(f"Total padded flops: {padded_flops}")
-
-    # # substitue symbols in the off_chip_traffic
-    # print(f"Total on-chip requirement (bytes): {on_chip_requirement}")
-    # print(f"Total off-chip traffic (bytes): {off_chip_traffic}")
-
-    # free_symbols = sorted(off_chip_traffic.free_symbols, key=str)
-    # print(f"Free symbols: {free_symbols}")
-
-    # sub_dict = {
-    #     symbol: value for symbol, value in zip(free_symbols, expert_counts.tolist())
-    # }
-    # off_chip_traffic_val = off_chip_traffic.subs(sub_dict)
-    # print(f"Total off-chip traffic (bytes): {off_chip_traffic_val}")
+    return (off_chip_traffic, on_chip_requirement, cycles, duration_s)
 
 
 def test_group_size_sweep():
@@ -960,39 +907,121 @@ def test_group_size_sweep():
     # model_config = SmallerMixtral()
     # model_config = SmallerDeepSeekV3()
     model_config = SmallerQwen30b()
+    tile_N = 16  # Size of grouped requests for each expert
+    tile_F = 16  # MoE intermediate dimension
 
-    iter = 1
-    layer = 16
-    expert_selection_file = f"/home/ginasohn/expert_routing/processed_qwen/continuous_batching_80gb_max4192_per_layer/iter_{iter:03d}_layer_{layer:03d}.npz"
-    expert_indices_npz = np.load(expert_selection_file)
-    expert_indices = torch.from_numpy(
-        expert_indices_npz["data"]
-    )  # [B, n_activated_experts]
+    # Same iteration, Different layer
+    iter_list = [22]  # 1-500, 2000-2100, 3000-3100, 4000-4100
+    layer_list = [2]  # [0, 1, 2, 10, 20, 30, 40, 46, 47]
 
-    B = expert_indices.shape[0]
+    # Same layer, Different iteration
+    # iter = [0,4,8,12,16,20, 24]
+    # layer = 20
 
-    # ------------ Input generation ------------
-    # Set the random seed
-    seed = 5
-    torch.manual_seed(seed)
+    group_size_list = [1]  # [1, 2, 4, 8, 16, 32]
 
-    input_tensor = torch.randn(B, model_config.dim)
+    for iter in iter_list:
+        for layer in layer_list:
+            results = []
+            for group_size in group_size_list:
+                expert_selection_file = f"/home/ginasohn/expert_routing/processed_qwen/continuous_batching_80gb_max4192_per_layer/iter_{iter:03d}_layer_{layer:03d}.npz"
+                expert_indices_npz = np.load(expert_selection_file)
+                expert_indices = torch.from_numpy(
+                    expert_indices_npz["data"]
+                )  # [B, n_activated_experts]
 
-    # ------------ Expert Indices ------------
-    # expert_indices: [B, n_activated_experts]
-    # expert_counts: [n_routed_experts] (bincount across all batches)
-    expert_counts = torch.bincount(
-        expert_indices.flatten(), minlength=model_config.n_routed_experts
-    )
-    print(f"Expert counts: {expert_counts}")
+                B = expert_indices.shape[0]
 
-    run_hybrid_moe_gemm(
-        tile_N=16,
-        tile_F=16,
-        group_size=2,
-        input_tensor=input_tensor,
-        expert_indices=expert_indices,
-        model_config=model_config,
-        simulate_rust="full",
-        gold_check=True,
-    )
+                # ------------ Input generation ------------
+                # Set the random seed
+                seed = 5
+                torch.manual_seed(seed)
+
+                input_tensor = torch.randn(B, model_config.dim)
+
+                # ------------ Expert Indices ------------
+                # expert_indices: [B, n_activated_experts]
+                # expert_counts: [n_routed_experts] (bincount across all batches)
+                expert_counts = torch.bincount(
+                    expert_indices.flatten(), minlength=model_config.n_routed_experts
+                )
+                print(f"Expert counts: {expert_counts}")
+
+                off_chip_traffic, on_chip_requirement, cycles, duration_s = (
+                    run_hybrid_moe_gemm(
+                        tile_N=tile_N,
+                        tile_F=tile_F,
+                        group_size=group_size,
+                        input_tensor=input_tensor,
+                        expert_indices=expert_indices,
+                        model_config=model_config,
+                        simulate_rust="timing",
+                        gold_check=False,
+                    )
+                )
+
+                # ------------ substitue symbols in the off_chip_traffic and on_chip_requirement ------------
+                num_tiles = [
+                    (routed_toks + tile_N - 1) // tile_N
+                    for routed_toks in expert_counts.tolist()
+                ]
+                after_pad_batch_dim = [
+                    num_tiles_i * tile_N for num_tiles_i in num_tiles
+                ]
+
+                flops = sum(
+                    [
+                        (
+                            2 * b * model_config.dim * model_config.moe_inter_dim * 3
+                        )  # 3 (Linear layers)
+                        + b * model_config.moe_inter_dim  # 1 (Element-wise mult)
+                        + (
+                            8 * b * model_config.dim * model_config.moe_inter_dim
+                        )  # silu_flops: 1(neg)+4(exp)+1(add)+1(div)+1(mul)= 8 FLOPs per element
+                        for b in after_pad_batch_dim
+                    ]
+                )
+
+                free_symbols = sorted(off_chip_traffic.free_symbols, key=str)
+
+                sub_dict = {
+                    symbol: value
+                    for symbol, value in zip(free_symbols, expert_counts.tolist())
+                }
+
+                off_chip_traffic_val = off_chip_traffic.subs(sub_dict)
+
+                results.append(
+                    {
+                        "group_size": group_size,
+                        "cycles": cycles,
+                        "flops": flops,
+                        "duration_s": duration_s,
+                        "off_chip_traffic_bytes": off_chip_traffic_val,
+                        "on_chip_requirement": on_chip_requirement,
+                    }
+                )
+
+            out_file = f"qwen_256_48_80gb_max4192_iter{iter:03d}_layer_{layer:03d}_n{tile_N}_f{tile_F}.csv"
+
+            try:
+                with open(out_file, "w", newline="", encoding="utf-8") as csvfile:
+                    fieldnames = [
+                        "group_size",
+                        "cycles",
+                        "flops",
+                        "duration_s",
+                        "off_chip_traffic_bytes",
+                        "on_chip_requirement",
+                    ]
+                    writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+
+                    writer.writeheader()
+
+                    # Write data rows
+                    for result in results:
+                        writer.writerow(result)
+
+                print(f"Results written to {out_file}")
+            except Exception as e:
+                print(f"Error writing CSV file: {e}")

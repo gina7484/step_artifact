@@ -7,7 +7,16 @@ from step_py.functions.accum_fn import AccumFn
 from step_py.functions.init_fn import InitFn
 from step_py.functions.map_accum_fn import MapAccumFn
 from step_py.functions.map_fn import MapFn
-from step_py.datatype import Buffer, MultiHot, Stream, Tile, Select, Float16, Float32
+from step_py.datatype import (
+    Buffer,
+    DynTile,
+    MultiHot,
+    Stream,
+    Tile,
+    Select,
+    Float16,
+    Float32,
+)
 from networkx import MultiDiGraph
 import sympy
 
@@ -2089,7 +2098,7 @@ class Reshape(StepOps):
         assert (
             reshape_rank > 0 and in_stream.shape[reshape_rank] % chunk_size == 0
         ) or (
-            pad_fn is not None and reshape_rank == 0
+            reshape_rank == 0 and (pad_fn is not None or chunk_size == 1)
         ), "The chunk size must be a divisor of the shape at the reshape rank if the rank being split is not the innermost"
 
         assert (
@@ -2190,10 +2199,10 @@ class RetileStreamify(StepOps):
         in_stream: Stream = get_stream(input)
 
         assert isinstance(
-            in_stream.stream_dtype, Tile
+            in_stream.stream_dtype, (Tile, DynTile)
         ), "Input stream must be a Tile type."
 
-        in_stream_tile: Tile = in_stream.stream_dtype
+        in_stream_tile: Union[Tile, DynTile] = in_stream.stream_dtype
         if split_row:
             if filter_mask:
                 output_stream_shape = in_stream.shape[:-1] + (

@@ -60,7 +60,14 @@ def Linear(
     elif isinstance(input, (StepOps, Tuple)):
         outer_dims = get_stream(input).shape[1:-1]
         if N == tile_config.n:  # TileM / TileMK (Not tiling N)
-            formatted_input = Promote(graph=step_graph, input=input, promote_rank=1)
+            # formatted_input = Promote(graph=step_graph, input=input, promote_rank=1)
+            formatted_input = Reshape(
+                graph=step_graph,
+                input=input,
+                chunk_size=1,
+                reshape_rank=1,
+                write_back_mu=False,
+            )
         else:  # TileMN / TileMNK (N is tiled)
             buff_rank = 1
             buff = Bufferize(step_graph, input, buff_rank)

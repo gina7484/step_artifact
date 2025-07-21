@@ -1,5 +1,7 @@
 from networkx import MultiDiGraph
 import torch
+import csv
+
 from step_py.datatype import DynTile
 from step_py.kernels.linear import LinearTileConfig
 from step_py.utility_ops import *
@@ -33,6 +35,7 @@ def ws_tile_mn_mk_gemm_reshape(
     w_down_list: list[torch.Tensor],
     tile_N: int,  # M
     tile_F: int,  # Gate & Up (K), Down (N)
+    mock_bf16: bool,
 ) -> OffChipStore:
     F = model_config.moe_inter_dim
     D = model_config.dim
@@ -53,6 +56,7 @@ def ws_tile_mn_mk_gemm_reshape(
         tile_row=1,
         tile_col=D,
         par_dispatch=4,
+        mock_bf16=mock_bf16,
     )
 
     flatten_in_load = Flatten(
@@ -85,6 +89,7 @@ def ws_tile_mn_mk_gemm_reshape(
         tile_row=1,
         tile_col=1,
         par_dispatch=4,
+        mock_bf16=mock_bf16,
     )
 
     # ------------ Stage 4: Partition the input feature stream ------------
@@ -117,7 +122,7 @@ def ws_tile_mn_mk_gemm_reshape(
                 write_back_mu=False,
                 pad_fn=init_fn.Zero(shape=(1, D), dtype=Float32()),
             ),
-            Tile(tile_dtype=Float32(), shape=(tile_N, D)),
+            Tile(tile_dtype=Float32(), shape=(tile_N, D)),  # output type
             accum_fn.RetileRow(),
             init_fn.Empty(shape=(0, D), dtype=Float32()),
             1,
@@ -154,6 +159,7 @@ def ws_tile_mn_mk_gemm_reshape(
             tile_row=D,
             tile_col=tile_F,
             par_dispatch=4,
+            mock_bf16=mock_bf16,
         )
         for i in range(model_config.n_routed_experts)
     ]
@@ -201,6 +207,7 @@ def ws_tile_mn_mk_gemm_reshape(
             tile_row=D,
             tile_col=tile_F,
             par_dispatch=4,
+            mock_bf16=mock_bf16,
         )
         for i in range(model_config.n_routed_experts)
     ]
@@ -273,6 +280,7 @@ def ws_tile_mn_mk_gemm_reshape(
             tile_row=tile_F,
             tile_col=D,
             par_dispatch=4,
+            mock_bf16=mock_bf16,
         )
         for i in range(model_config.n_routed_experts)
     ]
@@ -407,10 +415,12 @@ def ws_tile_mn_mk_gemm_reshape(
     # ------------ Stage 17: Store the output ------------
     output = OffChipStore(
         step_graph,
-        Promote(
+        Reshape(
             graph=step_graph,
             input=accumed_stream,
-            promote_rank=0,
+            chunk_size=1,
+            reshape_rank=0,
+            write_back_mu=True,
         ),
         par_dispatch=4,
         store_file_name="output",
@@ -439,9 +449,10 @@ def call_ws_tile_mn_mk_gemm_reshape(
     tile_N: int,
     tile_F: int,
     save_graph: bool,
-    simulate_rust: bool,
+    simulate_rust: str,
     logging: Optional[str] = None,
-) -> tuple[StepOps, sympy.Expr, sympy.Expr]:
+    mock_bf16: bool = False,
+) -> tuple[StepOps, sympy.Expr, sympy.Expr, int, int]:
     step_graph = MultiDiGraph()
 
     output: OffChipStore = ws_tile_mn_mk_gemm_reshape(
@@ -464,6 +475,7 @@ def call_ws_tile_mn_mk_gemm_reshape(
         w_down_list=w_down_list,
         tile_N=tile_N,
         tile_F=tile_F,
+        mock_bf16=mock_bf16,
     )
 
     print(f"Output untiled: {output.get_untiled_shape()}")
@@ -489,12 +501,18 @@ def call_ws_tile_mn_mk_gemm_reshape(
         else:
             raise ValueError(f"Node {node} in the graph is not a StepOps")
 
-    if simulate_rust:
+    cycles = 0
+    duration_ms = 0
+    duration_s = 0
+
+    if simulate_rust in ["full", "timing"]:
         hbm_config = HBMConfig(64, 8, 2, 2, 1, 14)
-        sim_config = SimConfig(channel_depth=1)
+        sim_config = SimConfig(
+            channel_depth=1, functional_sim=simulate_rust == "full", mock_bf16=mock_bf16
+        )
 
         if logging is None:
-            simulate(
+            cycles, duration_ms, duration_s = simulate(
                 step_graph,
                 False,  # logging
                 hbm_config,
@@ -503,7 +521,7 @@ def call_ws_tile_mn_mk_gemm_reshape(
             )
         else:
             assert isinstance(logging, str), "Logging must be a string path"
-            simulate(
+            cycles, duration_ms, duration_s = simulate(
                 step_graph,
                 True,  # logging
                 hbm_config,
@@ -516,6 +534,8 @@ def call_ws_tile_mn_mk_gemm_reshape(
         output,
         sympy.simplify(total_off_chip_traffic),
         sympy.simplify(total_on_chip_requirement),
+        cycles,
+        duration_s,
     )
 
 
@@ -541,6 +561,24 @@ class SmallerMixtral:  # 32x scaled down version for each dimension
     n_activated_experts = 2
     dim = 128  # 4096/32
     moe_inter_dim = 448  # 14336/32 (Can use tile size of 64)
+
+
+@dataclass
+class SmallerQwen30b:  # 16x scaled down version for each dimension
+    n_routed_experts = 128
+    n_activated_experts = 8
+    dim = 128  # 2048 // 16
+    moe_inter_dim = 48  # 768 // 16
+
+
+@dataclass
+class Qwen30b:
+    n_routed_experts = 128
+    n_activated_experts = 8
+    dim = 2048  # https://huggingface.co/Qwen/Qwen3-30B-A3B/blob/main/config.json#L12
+    moe_inter_dim = (
+        768  # https://huggingface.co/Qwen/Qwen3-30B-A3B/blob/main/config.json#L19
+    )
 
 
 @dataclass
@@ -611,44 +649,36 @@ def get_expert_selection(
         return (expert_indices, expert_counts)
 
 
-def run_ws_tile_mn_mk(tile_N: int):
-    # ------------ Sim Conig ------------
-    simulate_rust = True
+def run_ws_tile_mn_mk(
+    tile_N: int,  # M (The number of requests to chunk for the GEMM in each expert)
+    tile_F: int,  # K (The tile size used for the model_config.dim dimension)
+    input_tensor,
+    expert_indices,
+    model_config,
+    simulate_rust,  # either "full", "timing", None
+    gold_check,
+    mock_bf16: bool = False,
+):
 
-    # ------------ Model Configuration ------------
-    model_config = SmallerMixtral()
-
-    # ------------ Batch Size ------------
-    B = 64
+    B = expert_indices.shape[0]
 
     # ------------ Tile Configuration ------------
-    tile_N = tile_N  # M (The number of requests to chunk for the GEMM in each expert)
-    tile_F = 32  # K (The tile size used for the model_config.dim dimension)
     # For the model_config.moe_inter_dim dimension, we don't tile
     # For Gate & Up linear, we use TileMN. For Down linear, we use TileMK.
 
     # ------------ Compute Bandwidths ------------
-    GATE_COMPUTE_BW = 1022
-    UP_COMPUTE_BW = 1022
-    ACT_FN_COMPUTE_BW = 1022
-    MULT_COMPUTE_BW = 1022
-    DOWN_COMPUTE_BW = 1022
-    WEIGHT_SCALE_COMPUTE_BW = 1022
-    ACCUM_COMPUTE_BW = 1022
+    GATE_COMPUTE_BW = 6400
+    UP_COMPUTE_BW = 6400
+    ACT_FN_COMPUTE_BW = 6400
+    MULT_COMPUTE_BW = 6400
+    DOWN_COMPUTE_BW = 6400
+    WEIGHT_SCALE_COMPUTE_BW = 6400
+    ACCUM_COMPUTE_BW = 6400
 
     # ------------ Input generation ------------
     input_tensor = torch.randn(B, model_config.dim)
 
     # ------------ Expert Indices ------------
-    # Set the random seed
-    seed = 5
-    torch.manual_seed(seed)
-
-    # expert_indices: [B, n_activated_experts]
-    # expert_counts: [n_routed_experts] (bincount across all batches)
-    expert_indices, expert_counts = get_expert_selection(B, model_config, seed)
-    print(f"Expert counts: {expert_counts}")
-
     # [B, n_routed_experts]
     expert_multihot = topk_to_multihot(expert_indices, model_config.n_routed_experts)
 
@@ -692,7 +722,7 @@ def run_ws_tile_mn_mk(tile_N: int):
     off_chip_traffic: sympy.Expr
     on_chip_requirement: sympy.Expr
 
-    output, off_chip_traffic, on_chip_requirement = call_ws_tile_mn_mk_gemm_reshape(  # type: ignore (Cannot infer type of output properly)
+    output, off_chip_traffic, on_chip_requirement, cycles, duration_s = call_ws_tile_mn_mk_gemm_reshape(  # type: ignore (Cannot infer type of output properly)
         model_config=model_config,
         batch=B,
         gate_compute_bw=GATE_COMPUTE_BW,
@@ -713,10 +743,11 @@ def run_ws_tile_mn_mk(tile_N: int):
         tile_N=tile_N,
         save_graph=False,
         simulate_rust=simulate_rust,
+        mock_bf16=mock_bf16,
         # logging="expert_par_gemm_reshape",
     )
 
-    if simulate_rust:
+    if simulate_rust and gold_check:
         # Gold calculation
         final_gold = moe_gold_calc(
             input_tensor,
@@ -729,70 +760,438 @@ def run_ws_tile_mn_mk(tile_N: int):
 
         check_gold_tensor(output.store_file_name, final_gold)
 
-    # ------------ substitue symbols in the off_chip_traffic and on_chip_requirement ------------
-    print(f"\n\n=================== TILE SIZE: {tile_N} ===================")
-    print(f"Batch size: {B}")
-    print(f"Model config: {model_config}")
-    print(f"Tile F: {tile_F}")
+    return (off_chip_traffic, on_chip_requirement, cycles, duration_s)
 
-    num_tiles = [
-        (routed_toks + tile_N - 1) // tile_N for routed_toks in expert_counts.tolist()
-    ]
 
-    after_pad_batch_dim = [num_tiles_i * tile_N for num_tiles_i in num_tiles]
+def test_gemm_sweep():
+    mock_bf16 = True
+    # ------------ Model Configuration ------------
+    model_config = SmallerQwen30b()
 
-    padded_rows = [
-        total_toks - raw_toks
-        for total_toks, raw_toks in zip(after_pad_batch_dim, expert_counts.tolist())
-    ]
+    tile_Ns = [64, 32, 16, 8]  # For the batch dim (44)
+    tile_Fs = [
+        48,
+        24,
+        16,
+        8,
+    ]  # For the model_config.moe_inter_dim (48)
 
-    print(f"Padded rows: {padded_rows}")
+    # ------------ Expert Indices ------------
+    iter = 22
+    layer = 10
+    expert_selection_file = f"/home/ginasohn/expert_routing/processed_qwen/continuous_batching_80gb_max4192_per_layer/iter_{iter:03d}_layer_{layer:03d}.npz"
+    expert_indices_npz = np.load(expert_selection_file)
+    expert_indices = torch.from_numpy(
+        expert_indices_npz["data"]
+    )  # [B, n_activated_experts]
 
-    flops = sum(
-        [
-            (
-                2 * b * model_config.dim * model_config.moe_inter_dim * 3
-            )  # 3 (Linear layers)
-            + b * model_config.moe_inter_dim  # 1 (Element-wise mult)
-            + (
-                8 * b * model_config.dim * model_config.moe_inter_dim
-            )  # silu_flops: 1(neg)+4(exp)+1(add)+1(div)+1(mul)= 8 FLOPs per element
-            for b in after_pad_batch_dim
-        ]
+    # expert_counts: [n_routed_experts] (bincount across all batches)
+    expert_counts = torch.bincount(
+        expert_indices.flatten(), minlength=model_config.n_routed_experts
     )
+    print(f"Expert counts: {expert_counts}")
 
-    print(f"Total flops: {flops}")
+    # ------------ Input generation -----------
+    B = expert_indices.shape[0]
 
-    padded_flops = sum(
-        [
-            (
-                2 * b * model_config.dim * model_config.moe_inter_dim * 3
-            )  # 3 (Linear layers)
-            + b * model_config.moe_inter_dim  # 1 (Element-wise mult)
-            + (
-                8 * b * model_config.dim * model_config.moe_inter_dim
-            )  # silu_flops: 1(neg)+4(exp)+1(add)+1(div)+1(mul)= 8 FLOPs per element
-            for b in padded_rows
-        ]
-    )
+    # Set the random seed
+    seed = 5
+    torch.manual_seed(seed)
 
-    print(f"Total padded flops: {padded_flops}")
+    input_tensor = torch.randn(B, model_config.dim)
 
-    # substitue symbols in the off_chip_traffic
-    print(f"Total on-chip requirement (bytes): {on_chip_requirement}")
-    print(f"Total off-chip traffic (bytes): {off_chip_traffic}")
+    results = []
 
-    free_symbols = sorted(off_chip_traffic.free_symbols, key=str)
-    print(f"Free symbols: {free_symbols}")
-
-    sub_dict = {
-        symbol: value for symbol, value in zip(free_symbols, expert_counts.tolist())
-    }
-    off_chip_traffic_val = off_chip_traffic.subs(sub_dict)
-    print(f"Total off-chip traffic (bytes): {off_chip_traffic_val}")
-
-
-def test_mixtral_gemm_sweep():
-    tile_Ns = [4, 8, 16, 32, 64]
     for tile_N in tile_Ns:
-        run_ws_tile_mn_mk(tile_N)
+        for tile_F in tile_Fs:
+            off_chip_traffic, on_chip_requirement, cycles, duration_s = (
+                run_ws_tile_mn_mk(
+                    tile_N,
+                    tile_F,
+                    input_tensor,
+                    expert_indices,
+                    model_config,
+                    "timing",
+                    False,
+                    mock_bf16,
+                )
+            )
+
+            # ------------ substitue symbols in the off_chip_traffic and on_chip_requirement ------------
+            num_tiles = [
+                (routed_toks + tile_N - 1) // tile_N
+                for routed_toks in expert_counts.tolist()
+            ]
+            after_pad_batch_dim = [num_tiles_i * tile_N for num_tiles_i in num_tiles]
+
+            padded_rows = [
+                total_toks - raw_toks
+                for total_toks, raw_toks in zip(
+                    after_pad_batch_dim, expert_counts.tolist()
+                )
+            ]
+
+            flops = sum(
+                [
+                    (
+                        2 * b * model_config.dim * model_config.moe_inter_dim * 3
+                    )  # 3 (Linear layers)
+                    + b * model_config.moe_inter_dim  # 1 (Element-wise mult)
+                    + (
+                        8 * b * model_config.dim * model_config.moe_inter_dim
+                    )  # silu_flops: 1(neg)+4(exp)+1(add)+1(div)+1(mul)= 8 FLOPs per element
+                    for b in after_pad_batch_dim
+                ]
+            )
+
+            padded_flops = sum(
+                [
+                    (
+                        2 * b * model_config.dim * model_config.moe_inter_dim * 3
+                    )  # 3 (Linear layers)
+                    + b * model_config.moe_inter_dim  # 1 (Element-wise mult)
+                    + (
+                        8 * b * model_config.dim * model_config.moe_inter_dim
+                    )  # silu_flops: 1(neg)+4(exp)+1(add)+1(div)+1(mul)= 8 FLOPs per element
+                    for b in padded_rows
+                ]
+            )
+
+            free_symbols = sorted(off_chip_traffic.free_symbols, key=str)
+
+            sub_dict = {
+                symbol: value
+                for symbol, value in zip(free_symbols, expert_counts.tolist())
+            }
+
+            off_chip_traffic_val = off_chip_traffic.subs(sub_dict)
+
+            dict_to_append = {
+                "batch": B,
+                "tile_N": tile_N,
+                "tile_F": tile_F,
+                "flops": flops,
+                "padded_flops": padded_flops,
+                "cycles": cycles,
+                "duration_s": duration_s,
+                "off_chip_traffic_bytes": off_chip_traffic_val,
+                "on_chip_requirement_bytes": on_chip_requirement,
+            }
+            print(dict_to_append)
+            results.append(dict_to_append)
+
+    out_file = f"qwen_{model_config.dim}_{model_config.moe_inter_dim}_80gb_max4192_iter{iter:03d}_layer_{layer:03d}_n{tile_N}_f{tile_F}.csv"
+    try:
+        with open(out_file, "w", newline="", encoding="utf-8") as csvfile:
+            fieldnames = [
+                "batch",
+                "tile_N",
+                "tile_F",
+                "flops",
+                "padded_flops",
+                "cycles",
+                "duration_s",
+                "off_chip_traffic_bytes",
+                "on_chip_requirement_bytes",
+            ]
+            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+
+            writer.writeheader()
+
+            # Write data rows
+            for result in results:
+                writer.writerow(result)
+
+        print(f"Results written to {out_file}")
+    except Exception as e:
+        print(f"Error writing CSV file: {e}")
+
+
+def test_gemm_sweep_L0():
+    mock_bf16 = True
+    # ------------ Model Configuration ------------
+    model_config = SmallerQwen30b()
+
+    tile_Ns = [64, 32, 16, 8]  # For the batch dim (44)
+    tile_Fs = [
+        48,
+        24,
+        16,
+        8,
+    ]  # For the model_config.moe_inter_dim (48)
+
+    # ------------ Expert Indices ------------
+    iter = 22
+    layer = 0
+    expert_selection_file = f"/home/ginasohn/expert_routing/processed_qwen/continuous_batching_80gb_max4192_per_layer/iter_{iter:03d}_layer_{layer:03d}.npz"
+    expert_indices_npz = np.load(expert_selection_file)
+    expert_indices = torch.from_numpy(
+        expert_indices_npz["data"]
+    )  # [B, n_activated_experts]
+
+    # expert_counts: [n_routed_experts] (bincount across all batches)
+    expert_counts = torch.bincount(
+        expert_indices.flatten(), minlength=model_config.n_routed_experts
+    )
+    print(f"Expert counts: {expert_counts}")
+
+    # ------------ Input generation -----------
+    B = expert_indices.shape[0]
+
+    # Set the random seed
+    seed = 5
+    torch.manual_seed(seed)
+
+    input_tensor = torch.randn(B, model_config.dim)
+
+    results = []
+
+    for tile_N in tile_Ns:
+        for tile_F in tile_Fs:
+            off_chip_traffic, on_chip_requirement, cycles, duration_s = (
+                run_ws_tile_mn_mk(
+                    tile_N,
+                    tile_F,
+                    input_tensor,
+                    expert_indices,
+                    model_config,
+                    "timing",
+                    False,
+                    mock_bf16,
+                )
+            )
+
+            # ------------ substitue symbols in the off_chip_traffic and on_chip_requirement ------------
+            num_tiles = [
+                (routed_toks + tile_N - 1) // tile_N
+                for routed_toks in expert_counts.tolist()
+            ]
+            after_pad_batch_dim = [num_tiles_i * tile_N for num_tiles_i in num_tiles]
+
+            padded_rows = [
+                total_toks - raw_toks
+                for total_toks, raw_toks in zip(
+                    after_pad_batch_dim, expert_counts.tolist()
+                )
+            ]
+
+            flops = sum(
+                [
+                    (
+                        2 * b * model_config.dim * model_config.moe_inter_dim * 3
+                    )  # 3 (Linear layers)
+                    + b * model_config.moe_inter_dim  # 1 (Element-wise mult)
+                    + (
+                        8 * b * model_config.dim * model_config.moe_inter_dim
+                    )  # silu_flops: 1(neg)+4(exp)+1(add)+1(div)+1(mul)= 8 FLOPs per element
+                    for b in after_pad_batch_dim
+                ]
+            )
+
+            padded_flops = sum(
+                [
+                    (
+                        2 * b * model_config.dim * model_config.moe_inter_dim * 3
+                    )  # 3 (Linear layers)
+                    + b * model_config.moe_inter_dim  # 1 (Element-wise mult)
+                    + (
+                        8 * b * model_config.dim * model_config.moe_inter_dim
+                    )  # silu_flops: 1(neg)+4(exp)+1(add)+1(div)+1(mul)= 8 FLOPs per element
+                    for b in padded_rows
+                ]
+            )
+
+            free_symbols = sorted(off_chip_traffic.free_symbols, key=str)
+
+            sub_dict = {
+                symbol: value
+                for symbol, value in zip(free_symbols, expert_counts.tolist())
+            }
+
+            off_chip_traffic_val = off_chip_traffic.subs(sub_dict)
+
+            dict_to_append = {
+                "batch": B,
+                "tile_N": tile_N,
+                "tile_F": tile_F,
+                "flops": flops,
+                "padded_flops": padded_flops,
+                "cycles": cycles,
+                "duration_s": duration_s,
+                "off_chip_traffic_bytes": off_chip_traffic_val,
+                "on_chip_requirement_bytes": on_chip_requirement,
+            }
+            print(dict_to_append)
+            results.append(dict_to_append)
+
+    out_file = f"qwen_{model_config.dim}_{model_config.moe_inter_dim}_80gb_max4192_iter{iter:03d}_layer_{layer:03d}_n{tile_N}_f{tile_F}.csv"
+    try:
+        with open(out_file, "w", newline="", encoding="utf-8") as csvfile:
+            fieldnames = [
+                "batch",
+                "tile_N",
+                "tile_F",
+                "flops",
+                "padded_flops",
+                "cycles",
+                "duration_s",
+                "off_chip_traffic_bytes",
+                "on_chip_requirement_bytes",
+            ]
+            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+
+            writer.writeheader()
+
+            # Write data rows
+            for result in results:
+                writer.writerow(result)
+
+        print(f"Results written to {out_file}")
+    except Exception as e:
+        print(f"Error writing CSV file: {e}")
+
+
+def test_gemm_sweep_wo_sim():
+    mock_bf16 = True
+    # ------------ Model Configuration ------------
+    model_config = Qwen30b()  # 2048, 768
+
+    tile_Ns = [64, 32, 16, 8]  # For the batch dim (44)
+    tile_Fs = [
+        768,
+        256,
+        128,
+        64,
+        32,
+        16,
+    ]  # For the model_config.moe_inter_dim (768)
+
+    # ------------ Expert Indices ------------
+    iter = 22
+    layer = 10
+    expert_selection_file = f"/home/ginasohn/expert_routing/processed_qwen/continuous_batching_80gb_max4192_per_layer/iter_{iter:03d}_layer_{layer:03d}.npz"
+    expert_indices_npz = np.load(expert_selection_file)
+    expert_indices = torch.from_numpy(
+        expert_indices_npz["data"]
+    )  # [B, n_activated_experts]
+
+    # expert_counts: [n_routed_experts] (bincount across all batches)
+    expert_counts = torch.bincount(
+        expert_indices.flatten(), minlength=model_config.n_routed_experts
+    )
+    print(f"Expert counts: {expert_counts}")
+
+    # ------------ Input generation -----------
+    B = expert_indices.shape[0]
+
+    # Set the random seed
+    seed = 5
+    torch.manual_seed(seed)
+
+    input_tensor = torch.randn(B, model_config.dim)
+
+    results = []
+
+    for tile_N in tile_Ns:
+        for tile_F in tile_Fs:
+            off_chip_traffic, on_chip_requirement, cycles, duration_s = (
+                run_ws_tile_mn_mk(
+                    tile_N,
+                    tile_F,
+                    input_tensor,
+                    expert_indices,
+                    model_config,
+                    None,  # simulate_rust
+                    False,
+                    mock_bf16,
+                )
+            )
+
+            # ------------ substitue symbols in the off_chip_traffic and on_chip_requirement ------------
+            num_tiles = [
+                (routed_toks + tile_N - 1) // tile_N
+                for routed_toks in expert_counts.tolist()
+            ]
+            after_pad_batch_dim = [num_tiles_i * tile_N for num_tiles_i in num_tiles]
+
+            padded_rows = [
+                total_toks - raw_toks
+                for total_toks, raw_toks in zip(
+                    after_pad_batch_dim, expert_counts.tolist()
+                )
+            ]
+
+            flops = sum(
+                [
+                    (
+                        2 * b * model_config.dim * model_config.moe_inter_dim * 3
+                    )  # 3 (Linear layers)
+                    + b * model_config.moe_inter_dim  # 1 (Element-wise mult)
+                    + (
+                        8 * b * model_config.dim * model_config.moe_inter_dim
+                    )  # silu_flops: 1(neg)+4(exp)+1(add)+1(div)+1(mul)= 8 FLOPs per element
+                    for b in after_pad_batch_dim
+                ]
+            )
+
+            padded_flops = sum(
+                [
+                    (
+                        2 * b * model_config.dim * model_config.moe_inter_dim * 3
+                    )  # 3 (Linear layers)
+                    + b * model_config.moe_inter_dim  # 1 (Element-wise mult)
+                    + (
+                        8 * b * model_config.dim * model_config.moe_inter_dim
+                    )  # silu_flops: 1(neg)+4(exp)+1(add)+1(div)+1(mul)= 8 FLOPs per element
+                    for b in padded_rows
+                ]
+            )
+
+            free_symbols = sorted(off_chip_traffic.free_symbols, key=str)
+
+            sub_dict = {
+                symbol: value
+                for symbol, value in zip(free_symbols, expert_counts.tolist())
+            }
+
+            off_chip_traffic_val = off_chip_traffic.subs(sub_dict)
+
+            dict_to_append = {
+                "batch": B,
+                "tile_N": tile_N,
+                "tile_F": tile_F,
+                "flops": flops,
+                "padded_flops": padded_flops,
+                "cycles": cycles,
+                "duration_s": duration_s,
+                "off_chip_traffic_bytes": off_chip_traffic_val,
+                "on_chip_requirement_bytes": on_chip_requirement,
+            }
+            print(dict_to_append)
+            results.append(dict_to_append)
+
+    out_file = f"no_sim_qwen_{model_config.dim}_{model_config.moe_inter_dim}_80gb_max4192_iter{iter:03d}_layer_{layer:03d}_mn_mk.csv"
+    try:
+        with open(out_file, "w", newline="", encoding="utf-8") as csvfile:
+            fieldnames = [
+                "batch",
+                "tile_N",
+                "tile_F",
+                "flops",
+                "padded_flops",
+                "cycles",
+                "duration_s",
+                "off_chip_traffic_bytes",
+                "on_chip_requirement_bytes",
+            ]
+            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+
+            writer.writeheader()
+
+            # Write data rows
+            for result in results:
+                writer.writerow(result)
+
+        print(f"Results written to {out_file}")
+    except Exception as e:
+        print(f"Error writing CSV file: {e}")
