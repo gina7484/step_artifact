@@ -109,18 +109,34 @@ def ws_tile_mn_mk_gemm_reshape(
 
     # - input stream shape: [Dyn] x n_routed_experts (tile: [1, D])
     # - output stream:
-    #   - After Reshape: [(Dyn + tile_N -1) // tile_N, tile_N] x n_routed_experts (tile: [1, D])
+    #   - After Reshape: [dyn_1, (Dyn + tile_N -1) // tile_N, tile_N] x n_routed_experts (tile: [1, D])
+    #   - After Flatten: [(Dyn + tile_N -1) // tile_N, tile_N] x n_routed_experts (tile: [1, D])
     #   - After Accum:   [(Dyn + tile_N -1) // tile_N]         x n_routed_experts (tile: [tile_N, D])
+
+    reshaped_expert_feature_streams = [
+        Reshape(
+            step_graph,
+            (unchunked_expert_feature_streams, i),
+            tile_N,
+            0,
+            write_back_mu=False,
+            add_outer_dim=True,
+            pad_fn=init_fn.Zero(shape=(1, D), dtype=Float32()),
+        )
+        for i in range(model_config.n_routed_experts)
+    ]
+
+    # In this case, we don't need to specify the outermost 1 is a dynamic dim
+    # as it gets flattened with the dyn dim
+
     expert_feature_streams = [
         Accum(
             step_graph,
-            Reshape(
+            Flatten(
                 step_graph,
-                (unchunked_expert_feature_streams, i),
-                tile_N,
-                0,
-                write_back_mu=False,
-                pad_fn=init_fn.Zero(shape=(1, D), dtype=Float32()),
+                reshaped_expert_feature_streams[i],
+                min_rank=1,
+                max_rank=2,
             ),
             Tile(tile_dtype=Float32(), shape=(tile_N, D)),  # output type
             accum_fn.RetileRow(),
@@ -130,7 +146,7 @@ def ws_tile_mn_mk_gemm_reshape(
             1024,
         )
         for i in range(model_config.n_routed_experts)
-    ]  # [(Dyn + tile_N -1) // tile_N] of tile_N x D
+    ]  # [dyn_1 * (Dyn + tile_N -1) // tile_N] of tile_N x D
 
     # ------------ Stage 5: Repeat input features ------------
     # - input stream shape:   [(Dyn + tile_N -1) // tile_N] x n_routed_experts (tile: [tile_N, D])
@@ -489,9 +505,14 @@ def call_ws_tile_mn_mk_gemm_reshape(
     total_off_chip_traffic = sympy.Integer(0)
     total_on_chip_requirement = sympy.Integer(0)
 
+    off_chip_traffic_list = {}
     for node_tuple in step_graph.nodes(data=True):
         node, data = node_tuple
         if isinstance(node, StepOps):
+            if node.off_chip_traffic() != 0:
+                off_chip_traffic_list[
+                    f"{node.__class__.__name__}_{node.instance_id}"
+                ] = node.off_chip_traffic()
             total_off_chip_traffic = sympy.Add(
                 total_off_chip_traffic, node.off_chip_traffic()
             )
@@ -500,6 +521,9 @@ def call_ws_tile_mn_mk_gemm_reshape(
             )
         else:
             raise ValueError(f"Node {node} in the graph is not a StepOps")
+
+    # for key, value in sorted(off_chip_traffic_list.items()):
+    #     print(f"{key}: {value}")
 
     cycles = 0
     duration_ms = 0
