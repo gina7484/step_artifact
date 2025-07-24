@@ -669,8 +669,8 @@ def call_hybrid_moe_gemm(
 
     return (
         output,
-        sympy.simplify(total_off_chip_traffic),
-        sympy.simplify(total_on_chip_requirement),
+        total_off_chip_traffic,
+        total_on_chip_requirement,
         cycles,
         duration_s,
     )

@@ -69,7 +69,7 @@ class DynTile:
                 total_elements = total_elements * dim.expr
             else:
                 total_elements = total_elements * dim
-        return sympy.simplify(total_elements * self.tile_dtype.size_in_bytes())
+        return total_elements * self.tile_dtype.size_in_bytes()
 
     def __str__(self) -> str:
         return f"Tile({self.tile_dtype}, {self.shape})"
@@ -83,7 +83,7 @@ class Tile:
     def size_in_bytes(self) -> sympy.Expr:
         """Return the total size of this tile in bytes."""
         tile_size = sympy.Integer(self.shape[0] * self.shape[1])
-        return sympy.simplify(tile_size * self.tile_dtype.size_in_bytes())
+        return tile_size * self.tile_dtype.size_in_bytes()
 
     def __str__(self) -> str:
         return f"Tile({self.tile_dtype}, {self.shape})"
@@ -118,7 +118,7 @@ class Buffer:
                 total_elements = total_elements * dim.expr
             else:
                 total_elements = total_elements * dim
-        return sympy.simplify(total_elements * self.buff_dtype.size_in_bytes())
+        return total_elements * self.buff_dtype.size_in_bytes()
 
     def __str__(self) -> str:
         return f"Buffer({self.buff_dtype}, {self.shape})"
@@ -166,4 +166,4 @@ class Stream:
                 total_elements = total_elements * dim.expr
             else:
                 total_elements = total_elements * dim
-        return sympy.simplify(total_elements)
+        return total_elements

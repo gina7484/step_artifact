@@ -271,25 +271,15 @@ def test_gemm_dyn_tile():
                 for b in padded_rows
             ]
         )
+        # --------------- off-chip traffic ---------------
+        free_symbols = sorted(off_chip_traffic.free_symbols, key=str)
 
-        # --------------- Off-chip traffic ---------------
-        # Get only the dyn_1_* symbols from free symbols
-        dyn_1_symbols = [
-            symbol
-            for symbol in off_chip_traffic.free_symbols
-            if symbol.name.startswith("dyn_1_")
-        ]
-
-        # Sort them by the index to maintain order (optional but often useful)
-        dyn_1_symbols.sort(key=lambda s: int(s.name.split("_")[-1]))
-
-        dyn_1_values = [0 if x == 0 else 1 for x in expert_counts.tolist()]
-        # Create substitution dictionary
-        dyn_1_sub_dict = {
-            symbol: value for symbol, value in zip(dyn_1_symbols, dyn_1_values)
+        sub_dict = {
+            symbol: value for symbol, value in zip(free_symbols, expert_counts.tolist())
         }
+        # print(f"off_chip_traffic: {off_chip_traffic}")
 
-        off_chip_traffic_val = off_chip_traffic.subs(dyn_1_sub_dict)
+        off_chip_traffic_val = off_chip_traffic.subs(sub_dict)
 
         # --------------- On-chip requirement ---------------
         free_symbols = sorted(on_chip_requirement.free_symbols, key=str)

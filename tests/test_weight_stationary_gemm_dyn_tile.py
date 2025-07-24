@@ -147,10 +147,6 @@ def ws_tile_mn_mk_gemm_reshape_dyn_tile(
         for stream_i in round_to_16
     ]
 
-    # As the 1 in the output stream is a result of reducing a dynamic dim, we specify it as a dynamic dim (to handle cases where dyn value is 0)
-    for i, stream in enumerate(expert_feature_streams):
-        stream.stream.shape = (DynDim(f"dyn_1_{i}"),)
-
     # ------------ Stage 5: Repeat input features ------------
     # - input stream shape:   [dyn_1] x n_routed_experts (tile: [((Dyn + round_N -1) // round_N) * round_N, D])
     # - output stream shape:  [dyn_1, F // tile_F] x n_routed_experts (tile: [((Dyn + round_N -1) // round_N) * round_N, D])
@@ -540,8 +536,8 @@ def call_ws_tile_mn_mk_gemm_reshape_dyn_tile(
 
     return (
         output,
-        sympy.simplify(total_off_chip_traffic),
-        sympy.simplify(total_on_chip_requirement),
+        total_off_chip_traffic,
+        total_on_chip_requirement,
         cycles,
         duration_s,
     )

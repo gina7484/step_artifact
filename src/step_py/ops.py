@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from sympy import ceiling
+from sympy import ceiling, symbols, Piecewise, Integer
 import torch
 from typing import List, Optional, Tuple, Union
 from step_py.dyndim import DynDim
@@ -234,7 +234,7 @@ class IndexedOffChip(StepOps):
         write_traffic = self.wdata.total_elements() * sympy.Integer(
             self.tile_row * self.tile_col * self.n_byte
         )
-        return sympy.simplify(sympy.Add(read_traffic, write_traffic))
+        return sympy.Add(read_traffic, write_traffic)
 
     def on_chip_requirement(self, count_fifos: bool = False) -> sympy.Expr:
         """Return the on-chip memory requirement for this operation."""
@@ -242,7 +242,7 @@ class IndexedOffChip(StepOps):
         read_on_chip = sympy.Integer(0) if self.raddr is None else staging_area
         write_on_chip = sympy.Integer(0) if self.wdata is None else staging_area
 
-        return sympy.simplify(sympy.Add(read_on_chip, write_on_chip))
+        return sympy.Add(read_on_chip, write_on_chip)
 
 
 class OffChipLoad(StepOps):
@@ -352,7 +352,7 @@ class OffChipLoad(StepOps):
         total_elements = self._stream.total_elements() * sympy.Integer(
             self.tile_row * self.tile_col * self.n_byte
         )
-        return sympy.simplify(total_elements)
+        return total_elements
 
     def on_chip_requirement(self, count_fifos: bool = False) -> sympy.Expr:
         """Return the on-chip memory requirement for this operation."""
@@ -470,7 +470,8 @@ class DynOffChipLoad(StepOps):
         total_elements = self._stream.total_elements() * sympy.Integer(
             self.tile_row * self.tile_col * self.n_byte
         )
-        return sympy.simplify(total_elements)
+        # print(f"DynOffChipLoad: total_elements: {total_elements}")
+        return total_elements
 
     def on_chip_requirement(self, count_fifos: bool = False) -> sympy.Expr:
         """Return the on-chip memory requirement for this operation."""
@@ -546,7 +547,7 @@ class RepeatStatic(StepOps):
         stream_size: sympy.Expr = self._stream.stream_dtype.size_in_bytes()
 
         if count_fifos:
-            return sympy.simplify(sympy.Mul(stream_size, sympy.Integer(2)))
+            return sympy.Mul(stream_size, sympy.Integer(2))
         else:
             return stream_size
 
@@ -623,7 +624,7 @@ class Promote(StepOps):
 
         # Get the size of the stream's data type
         stream_size: sympy.Expr = self._stream.stream_dtype.size_in_bytes()
-        return sympy.simplify(sympy.Mul(stream_size, sympy.Integer(2)))
+        return sympy.Mul(stream_size, sympy.Integer(2))
 
 
 class BinaryMap(StepOps):
@@ -744,10 +745,8 @@ class BinaryMap(StepOps):
         in2_stream_dtype_size = in2_stream.stream_dtype.size_in_bytes()
         out_stream_dtype_size = self._stream.stream_dtype.size_in_bytes()
 
-        return sympy.simplify(
-            sympy.Add(
-                in1_stream_dtype_size, in2_stream_dtype_size, out_stream_dtype_size
-            )
+        return sympy.Add(
+            in1_stream_dtype_size, in2_stream_dtype_size, out_stream_dtype_size
         )
 
 
@@ -868,9 +867,7 @@ class BinaryMapAccum(StepOps):
         in_tile_size = in_stream.stream_dtype.size_in_bytes()
 
         # Return the size times (len(self._inputs) + 1) for FIFO requirements
-        return sympy.simplify(
-            sympy.Mul(in_tile_size, sympy.Integer(len(self.input_list) + 1))
-        )
+        return sympy.Mul(in_tile_size, sympy.Integer(len(self.input_list) + 1))
 
 
 class Broadcast(StepOps):
@@ -1026,9 +1023,7 @@ class OffChipStore(StepOps):
             input_stream.stream_dtype, Buffer
         ), "Input stream must be a Tile type."
         # Multiply by the size of the data type
-        return sympy.simplify(
-            sympy.Mul(total_elements, input_stream.stream_dtype.size_in_bytes())
-        )
+        return sympy.Mul(total_elements, input_stream.stream_dtype.size_in_bytes())
 
     def on_chip_requirement(self, count_fifos: bool = False) -> sympy.Expr:
         """Return the on-chip memory requirement for this operation."""
@@ -1125,7 +1120,7 @@ class Bufferize(StepOps):
         # Calculate the total number of elements in the input stream
         total_elements = in_stream.total_elements()
 
-        return sympy.simplify(sympy.Mul(total_elements, tile_size))
+        return sympy.Mul(total_elements, tile_size)
 
     def on_chip_requirement(self, count_fifos: bool = False) -> sympy.Expr:
         """Return the on-chip memory requirement for this operation."""
@@ -1147,7 +1142,7 @@ class Bufferize(StepOps):
         ), "Stream must be a Buffer type."
         buffer_size = self._stream.stream_dtype.size_in_bytes()
 
-        return sympy.simplify(sympy.Add(buffer_size, tile_size))
+        return sympy.Add(buffer_size, tile_size)
 
 
 class Streamify(StepOps):
@@ -1241,9 +1236,7 @@ class Streamify(StepOps):
         # Calculate the product of elements in repeat_factor
         repeat_product = sympy.Mul(*self.repeat_factor)
 
-        return sympy.simplify(
-            sympy.Mul(total_input_elements, repeat_product, buffer_size)
-        )
+        return sympy.Mul(total_input_elements, repeat_product, buffer_size)
 
     def on_chip_requirement(self, count_fifos: bool = True) -> sympy.Expr:
         """Return the on-chip memory requirement for this operation."""
@@ -1263,7 +1256,7 @@ class Streamify(StepOps):
         # Calculate the size of the buffer (self._stream's datatype)
         buffer_size = in_stream.stream_dtype.size_in_bytes()
 
-        return sympy.simplify(sympy.Add(buffer_size, tile_size))
+        return sympy.Add(buffer_size, tile_size)
 
 
 class DynStreamify(StepOps):
@@ -1378,7 +1371,7 @@ class DynStreamify(StepOps):
         # Get the size of the buffer (the data type of self._stream)
         buffer_size = self._stream.stream_dtype.size_in_bytes()
 
-        return sympy.simplify(sympy.Mul(ref_elements, buffer_size))
+        return sympy.Mul(ref_elements, buffer_size)
 
     def on_chip_requirement(self, count_fifos: bool = False) -> sympy.Expr:
         """Return the on-chip memory requirement for this operation."""
@@ -1398,7 +1391,7 @@ class DynStreamify(StepOps):
         # Calculate the size of the buffer (self._stream's datatype)
         buffer_size = in_stream.stream_dtype.size_in_bytes()
 
-        return sympy.simplify(sympy.Add(buffer_size, tile_size))
+        return sympy.Add(buffer_size, tile_size)
 
 
 class FlatPartition(StepOps):
@@ -1437,7 +1430,7 @@ class FlatPartition(StepOps):
         in_stream: Stream = get_stream(input)
         # [Genghan] A trick: StepOps should use the same control_node to align the outermost dimension
         new_names = [
-            sympy.Symbol(f"{str(control_node)}_{i:03d}", integer=True, positive=True)
+            sympy.Symbol(f"{str(control_node)}_{i:03d}", integer=True, nonnegative=True)
             for i in range(num_consumers)
         ]
 
@@ -1512,9 +1505,7 @@ class FlatPartition(StepOps):
         in_tile_size = in_stream.stream_dtype.size_in_bytes()
 
         # Return the size times (num_consumers + 1) for FIFO requirements
-        return sympy.simplify(
-            sympy.Mul(in_tile_size, sympy.Integer(self.num_consumers + 1))
-        )
+        return sympy.Mul(in_tile_size, sympy.Integer(self.num_consumers + 1))
 
 
 class EagerMerge(StepOps):
@@ -1631,11 +1622,9 @@ class EagerMerge(StepOps):
 
         # Return the size times (len(self._inputs) + 1) for FIFO requirements
 
-        return sympy.simplify(
-            sympy.Mul(
-                sympy.Add(in_tile_size, sel_stream_out_size),
-                sympy.Integer(len(self._inputs) + 1),
-            )
+        return sympy.Mul(
+            sympy.Add(in_tile_size, sel_stream_out_size),
+            sympy.Integer(len(self._inputs) + 1),
         )
 
 
@@ -1767,18 +1756,14 @@ class FlatReassemble(StepOps):
                     reassembled_elements *= dim.expr
                 else:
                     reassembled_elements *= dim
-            return sympy.simplify(
-                sympy.Add(
-                    sympy.Mul(in_tile_size, sympy.Integer(len(self._inputs) + 1)),
-                    reassembled_elements * self._stream.stream_dtype.size_in_bytes(),
-                )
+            return sympy.Add(
+                sympy.Mul(in_tile_size, sympy.Integer(len(self._inputs) + 1)),
+                reassembled_elements * self._stream.stream_dtype.size_in_bytes(),
             )
 
         # Return the size times (len(self._inputs) + 1) for FIFO requirements
 
-        return sympy.simplify(
-            sympy.Mul(in_tile_size, sympy.Integer(len(self._inputs) + 1))
-        )
+        return sympy.Mul(in_tile_size, sympy.Integer(len(self._inputs) + 1))
 
 
 class UnaryMap(StepOps):
@@ -1871,7 +1856,7 @@ class UnaryMap(StepOps):
         in_tile_size = in_stream.stream_dtype.size_in_bytes()
         output_tile_size = self._stream.stream_dtype.size_in_bytes()
 
-        return sympy.simplify(sympy.Add(in_tile_size, output_tile_size))
+        return sympy.Add(in_tile_size, output_tile_size)
 
 
 class Accum(StepOps):
@@ -1965,7 +1950,7 @@ class Accum(StepOps):
         if not count_fifos:
             return accumulator_size
 
-        return sympy.simplify(sympy.Add(accumulator_size, input_size))
+        return sympy.Add(accumulator_size, input_size)
 
 
 class Flatten(StepOps):
@@ -2067,7 +2052,7 @@ class Flatten(StepOps):
 
         # Get the size of the stream's data type
         stream_size = self._stream.stream_dtype.size_in_bytes()
-        return sympy.simplify(sympy.Mul(stream_size, sympy.Integer(2)))
+        return sympy.Mul(stream_size, sympy.Integer(2))
 
 
 class Reshape(StepOps):
@@ -2118,6 +2103,38 @@ class Reshape(StepOps):
         rank_pos = in_stream.rank - reshape_rank
         if isinstance(in_stream.shape[rank_pos], DynDim):
             if add_outer_dim:  # this means in_stream.rank == 0
+                outer_most_expr: sympy.Expr = in_stream.shape[rank_pos].expr
+                # print(f"outer_most_expr: {outer_most_expr}")
+                dyn_1 = DynDim(
+                    Piecewise(
+                        (Integer(1), outer_most_expr >= 1),
+                        (Integer(0), outer_most_expr < 1),
+                    )
+                )
+                # print(f"dyn_1: {dyn_1}")
+
+                self._stream = Stream(
+                    stream_dtype=in_stream.stream_dtype,
+                    shape=(dyn_1,)
+                    + in_stream.shape[:rank_pos]
+                    + ((in_stream.shape[rank_pos] + chunk_size - 1) // chunk_size,)
+                    + (chunk_size,)
+                    + in_stream.shape[(rank_pos + 1) :],
+                )
+
+            else:
+                self._stream = Stream(
+                    stream_dtype=in_stream.stream_dtype,
+                    shape=in_stream.shape[:rank_pos]
+                    + ((in_stream.shape[rank_pos] + chunk_size - 1) // chunk_size,)
+                    + (chunk_size,)
+                    + in_stream.shape[(rank_pos + 1) :],
+                )
+        elif isinstance(in_stream.shape[rank_pos], int):
+            if add_outer_dim:  # this means in_stream.rank == 0
+                assert (
+                    in_stream.shape[rank_pos] > 0
+                ), "The outer most dimension must be greater than 0 if add_outer_dim is True for static case"
                 self._stream = Stream(
                     stream_dtype=in_stream.stream_dtype,
                     shape=(1,)
@@ -2135,14 +2152,6 @@ class Reshape(StepOps):
                     + (chunk_size,)
                     + in_stream.shape[(rank_pos + 1) :],
                 )
-        elif isinstance(in_stream.shape[rank_pos], int):
-            self._stream = Stream(
-                stream_dtype=in_stream.stream_dtype,
-                shape=in_stream.shape[:rank_pos]
-                + ((in_stream.shape[rank_pos] + chunk_size - 1) // chunk_size,)
-                + (chunk_size,)
-                + in_stream.shape[(rank_pos + 1) :],
-            )
         else:
             raise ValueError(
                 f"Unsupported shape type at rank {rank_pos}: {in_stream.shape[rank_pos]} (type: {type(in_stream.shape[rank_pos])})"
@@ -2197,7 +2206,7 @@ class Reshape(StepOps):
 
         # Get the size of the stream's data type
         stream_size = self._stream.stream_dtype.size_in_bytes()
-        return sympy.simplify(sympy.Mul(stream_size, sympy.Integer(2)))
+        return sympy.Mul(stream_size, sympy.Integer(2))
 
 
 class RetileStreamify(StepOps):
