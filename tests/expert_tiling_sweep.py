@@ -196,6 +196,126 @@ def create_gate_up_down_ops(
     return (result_gate, result_up)
 
 
+def create_gate_up_down_ops_repeat(
+    step_graph: MultiDiGraph,
+    input: torch.Tensor,
+    w_gate: torch.Tensor,
+    w_up: torch.Tensor,
+    tile_config: LinearTileConfig,
+    par_dispatch: int,
+    write_back_mu: bool,
+    comp_bw: int,
+) -> Tuple[StepOps, StepOps]:
+
+    # ================= (Load) & Format the input stream =================
+    formatted_input = None
+    outer_dims = ()
+
+    assert w_gate.shape == w_up.shape
+    weight_tensor_shape = tuple(w_gate.shape)
+    assert len(weight_tensor_shape) == 2
+    K = weight_tensor_shape[0]
+    N = weight_tensor_shape[1]
+
+    # Loading from off-chip
+    input_tensor_shape = tuple(input.shape)
+    assert len(input_tensor_shape) >= 2
+    raw_input = OffChipLoad(
+        underlying=input,
+        stride=(K // tile_config.k, 1),
+        out_shape_tiled=input_tensor_shape[:-2]
+        + (
+            input_tensor_shape[-2] // tile_config.m,
+            # N // tile_config.n,
+            input_tensor_shape[-1] // tile_config.k,
+        ),
+        tile_row=tile_config.m,
+        tile_col=tile_config.k,
+        par_dispatch=par_dispatch,
+    )
+    outer_dims = input_tensor_shape[:-2] + (input_tensor_shape[-2] // tile_config.m,)
+
+    flattened_raw_input = Flatten(
+        graph=step_graph,
+        input=raw_input,
+        min_rank=0,
+        max_rank=1,
+    )
+
+    repeated_raw_input = RepeatStatic(
+        graph=step_graph, input=flattened_raw_input, repeat_factor=N // tile_config.n
+    )
+
+    formatted_input = Reshape(
+        graph=step_graph,
+        input=repeated_raw_input,
+        chunk_size=1,
+        reshape_rank=0,
+        write_back_mu=False,
+    )
+
+    # ================= Load weight =================
+
+    formatted_weight_gate = OffChipLoad(
+        underlying=w_gate,
+        stride=(0,) * len(outer_dims) + (1, N // tile_config.n),
+        out_shape_tiled=outer_dims  # type:ignore
+        + (
+            N // tile_config.n,
+            K // tile_config.k,
+        ),
+        tile_row=tile_config.k,
+        tile_col=tile_config.n,
+        par_dispatch=par_dispatch,
+    )
+    print(f"Weight (gate) shape: {formatted_weight_gate.stream.shape}")
+
+    formatted_weight_up = OffChipLoad(
+        underlying=w_up,
+        stride=(0,) * len(outer_dims) + (1, N // tile_config.n),
+        out_shape_tiled=outer_dims  # type:ignore
+        + (
+            N // tile_config.n,
+            K // tile_config.k,
+        ),
+        tile_row=tile_config.k,
+        tile_col=tile_config.n,
+        par_dispatch=par_dispatch,
+    )
+    print(f"Weight (up) shape: {formatted_weight_up.stream.shape}")
+
+    # ================= Computation =================
+    result_gate = BinaryMapAccum(
+        graph=step_graph,
+        in1=formatted_input,
+        in2=formatted_weight_gate,
+        fn=map_accum_fn.Matmul(),
+        init_fn=init_fn.Zero(
+            shape=(tile_config.m, tile_config.n),
+            dtype=Float32(),
+        ),
+        rank=1,
+        write_back_mu=write_back_mu,
+        compute_bw=comp_bw,
+    )
+
+    result_up = BinaryMapAccum(
+        graph=step_graph,
+        in1=formatted_input,
+        in2=formatted_weight_up,
+        fn=map_accum_fn.Matmul(),
+        init_fn=init_fn.Zero(
+            shape=(tile_config.m, tile_config.n),
+            dtype=Float32(),
+        ),
+        rank=1,
+        write_back_mu=write_back_mu,
+        compute_bw=comp_bw,
+    )
+
+    return (result_gate, result_up)
+
+
 def test_expert_tiling_sweep():
     # ------------ Sim Conig ------------
     simulate_mode = "functional"
@@ -217,10 +337,10 @@ def test_expert_tiling_sweep():
     B = 32
 
     # ------------ Compute Bandwidths ------------
-    GATE_UP_COMPUTE_BW = 1022
-    ACT_FN_COMPUTE_BW = 1022
-    MULT_COMPUTE_BW = 1022
-    DOWN_COMPUTE_BW = 1022
+    GATE_UP_COMPUTE_BW = 2048
+    ACT_FN_COMPUTE_BW = 2048
+    MULT_COMPUTE_BW = 2048
+    DOWN_COMPUTE_BW = 2048
 
     torch.manual_seed(42)
 
@@ -510,32 +630,31 @@ def test_expert_tiling_sweep_single_schedule():
     }
 
     # ------------ Sim Conig ------------
-    # simulate_mode = "full"
-    simulate_mode = "timing"
+    simulate_mode = "full"
+    # simulate_mode = "timing"
     # simulate_mode = None
 
-    check_gold = False
+    check_gold = True
 
     logging = False
 
     par_dispatch = 4
 
     tiling_schedule_name = "mn_mk"
-    csv_filename = (
-        f"expert_tiling_sweep_{tiling_schedule_name}_qwen30b_{simulate_mode}.csv"
-    )
 
     # ------------ Model Configuration ------------
-    model_config = Qwen30b()
+    model_config = SimpleExample()
 
     # ------------ Batch Size ------------
     B = 64
 
+    csv_filename = f"expert_tiling_sweep_{tiling_schedule_name}_b{B}_dim{model_config.dim}_moe_inter_dim{model_config.moe_inter_dim}_{simulate_mode}.csv"
+
     # ------------ Compute Bandwidths ------------
-    GATE_UP_COMPUTE_BW = 1022
-    ACT_FN_COMPUTE_BW = 1022
-    MULT_COMPUTE_BW = 1022
-    DOWN_COMPUTE_BW = 1022
+    GATE_UP_COMPUTE_BW = 4096
+    ACT_FN_COMPUTE_BW = 4096
+    MULT_COMPUTE_BW = 4096
+    DOWN_COMPUTE_BW = 4096
 
     torch.manual_seed(42)
 
@@ -571,21 +690,21 @@ def test_expert_tiling_sweep_single_schedule():
     result_metrics_list = []
 
     tiling_schedule_to_test = [
-        # {"tile_m": 16, "tile_n": 16},
-        # {"tile_m": 16, "tile_n": 32},
+        {"tile_m": 16, "tile_n": 16},
+        {"tile_m": 16, "tile_n": 32},
         {"tile_m": 16, "tile_n": 64},
-        # {"tile_m": 16, "tile_n": 128},
-        # {"tile_m": 16, "tile_n": 256},
-        # {"tile_m": 32, "tile_n": 16},
-        # {"tile_m": 32, "tile_n": 32},
+        {"tile_m": 16, "tile_n": 128},
+        {"tile_m": 16, "tile_n": 256},
+        {"tile_m": 32, "tile_n": 16},
+        {"tile_m": 32, "tile_n": 32},
         {"tile_m": 32, "tile_n": 64},
-        # {"tile_m": 32, "tile_n": 128},
-        # {"tile_m": 32, "tile_n": 256},
-        # {"tile_m": 64, "tile_n": 16},
-        # {"tile_m": 64, "tile_n": 32},
-        # {"tile_m": 64, "tile_n": 64},
-        # {"tile_m": 64, "tile_n": 128},
-        # {"tile_m": 64, "tile_n": 256},
+        {"tile_m": 32, "tile_n": 128},
+        {"tile_m": 32, "tile_n": 256},
+        {"tile_m": 64, "tile_n": 16},
+        {"tile_m": 64, "tile_n": 32},
+        {"tile_m": 64, "tile_n": 64},
+        {"tile_m": 64, "tile_n": 128},
+        {"tile_m": 64, "tile_n": 256},
     ]
     for idx, tiling_size in enumerate(tiling_schedule_to_test):
         tiling_schedule = tiling_schedule_list[
@@ -694,7 +813,7 @@ def test_expert_tiling_sweep_single_schedule():
         # OUTPUT_FILENAME = (
         #     f"expert_{tiling_schedule_name}_{tile_m}_{tile_k}_{tile_n}_{tile_n_down}"
         # )
-        # save_graph_format(step_graph, OUTPUT_FILENAME, ["svg", "png"])
+        # save_graph_format(step_graph, OUTPUT_FILENAME, ["svg"])
 
         # ------------ Access-Reuse Analysis ------------
         total_off_chip_traffic = sympy.Integer(0)
