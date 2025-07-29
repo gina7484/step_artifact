@@ -89,25 +89,14 @@ class StepOps(ABC):
         pass
 
 
-class IndexedOffChip(StepOps):
-    """
-    Used to load a tensor from off-chip memory.
-    This can express cases where the memory's size is not known at compile time.
-    (e.g., KV cache, batched input)
-    This can also be used for accessing memory that requires random access.
-
-    Restrictions:
-    - waddr and wdata has to have the same shape
-    - wdata has to be the same tile shape as the given tile shape
-    """
-
-    raddr: Union[StepOps, Tuple[StepOps, int]]
-    waddr: Union[StepOps, Tuple[StepOps, int]]
-    wdata: Union[StepOps, Tuple[StepOps, int]]
+class RandomOffChipLoad(StepOps):
     underlying: torch.Tensor
+    tensor_shape_tiled: Tuple[int, ...]
+    raddr: Union[StepOps, Tuple[StepOps, int]]
     tile_row: int
     tile_col: int
     n_byte: int
+    base_addr_byte: int
     par_dispatch: int
     _stream: Stream
 
@@ -115,39 +104,29 @@ class IndexedOffChip(StepOps):
         self,
         graph: MultiDiGraph,
         underlying: torch.Tensor,
+        raddr: Union[StepOps, Tuple[StepOps, int]],
         tile_row: int,
         tile_col: int,
+        base_addr_byte: int,
         par_dispatch: int,
-        raddr: Optional[Union[StepOps, Tuple[StepOps, int]]] = None,
-        waddr: Optional[Union[StepOps, Tuple[StepOps, int]]] = None,
-        wdata: Optional[Union[StepOps, Tuple[StepOps, int]]] = None,
         mock_bf16: bool = False,
     ):
-        assert raddr is not None or (waddr is not None and wdata is not None)
-
         super().__init__()
 
         self.underlying = underlying
-
+        self.tensor_shape_tiled = tuple(
+            list(underlying.shape[:-2])
+            + [
+                underlying.shape[-2] // tile_row,
+                underlying.shape[-1] // tile_col,
+            ]
+        )
         self.raddr = raddr
-        self.waddr = waddr
-        self.wdata = wdata
-
         self.tile_row = tile_row
         self.tile_col = tile_col
+        self.base_addr_byte = base_addr_byte
         self.par_dispatch = par_dispatch
 
-        if raddr is not None:
-            ref_node = raddr if isinstance(raddr, StepOps) else raddr[0]
-            graph.add_edge(ref_node, self)
-        if waddr is not None:
-            ref_node = waddr if isinstance(waddr, StepOps) else waddr[0]
-            graph.add_edge(ref_node, self)
-        if wdata is not None:
-            ref_node = wdata if isinstance(wdata, StepOps) else wdata[0]
-            graph.add_edge(ref_node, self)
-
-        raddr_stream: Stream = get_stream(raddr)
         if underlying.dtype == torch.float32:
             if mock_bf16:
                 self.n_byte = 2  # we will use this to mimic bfloat16
@@ -158,11 +137,9 @@ class IndexedOffChip(StepOps):
                 tile_dtype=Float32(),
                 shape=(tile_row, tile_col),
             )
-            stream_shape = ()
-            if raddr is not None:
-                raddr_stream = get_stream(raddr)
-                stream_shape = raddr_stream.shape
-            self._stream = Stream(stream_dtype=stream_dtype, shape=stream_shape)
+            self._stream = Stream(
+                stream_dtype=stream_dtype, shape=get_stream(raddr).shape
+            )
         elif underlying.dtype == torch.float16:
             self.n_byte = 2
 
@@ -170,13 +147,14 @@ class IndexedOffChip(StepOps):
                 tile_dtype=Float16(),
                 shape=(tile_row, tile_col),
             )
-            stream_shape = ()
-            if raddr is not None:
-                raddr_stream = get_stream(raddr)
-                stream_shape = raddr_stream.shape
-            self._stream = Stream(stream_dtype=stream_dtype, shape=stream_shape)
+            self._stream = Stream(
+                stream_dtype=stream_dtype, shape=get_stream(raddr).shape
+            )
         else:
             raise ValueError(f"Unsupported dtype: {underlying.dtype}")
+
+        raddr_node = raddr if isinstance(raddr, StepOps) else raddr[0]
+        graph.add_edge(raddr_node, self)
 
     @property
     def stream(self) -> Stream:
@@ -189,13 +167,11 @@ class IndexedOffChip(StepOps):
 
     @property
     def input(self) -> Union["StepOps", Tuple["StepOps", int]]:
-        raise NotImplementedError(
-            "Shouldn't be called for nodes that doesn't have an input stream"
-        )
+        return self.raddr
 
     @property
     def input_list(self) -> List[Union["StepOps", Tuple["StepOps", int]]]:
-        return [self.raddr, self.waddr, self.wdata]
+        return [self.raddr]
 
     def stream_idx(self, idx: int) -> Stream:
         raise NotImplementedError(
@@ -208,41 +184,23 @@ class IndexedOffChip(StepOps):
 
     def replace_input(
         self,
-        org_input: Union["StepOps", Tuple["StepOps", int]],
-        new_input: Union["StepOps", Tuple["StepOps", int]],
+        org_input: Union[StepOps, Tuple[StepOps, int]],
+        new_input: Union[StepOps, Tuple[StepOps, int]],
     ):
-        if self.raddr == org_input:
-            if get_stream(self.raddr) != get_stream(new_input):
-                raise ValueError("The shape of the input stream shouldn't change")
-            self.raddr = new_input
-        elif self.waddr == org_input:
-            if get_stream(self.waddr) != get_stream(new_input):
-                raise ValueError("The shape of the input stream shouldn't change")
-            self.waddr = new_input
-        elif self.wdata == org_input:
-            if get_stream(self.wdata) != get_stream(new_input):
-                raise ValueError("The shape of the input stream shouldn't change")
-            self.wdata = new_input
-        else:
-            raise ValueError("Wrong org_input")
+        if get_stream(self.raddr) != get_stream(new_input):
+            raise ValueError("The shape of the input stream shouldn't change")
+        self.raddr = new_input
 
     def off_chip_traffic(self) -> sympy.Expr:
         """Return the off-chip traffic for this operation."""
-        read_traffic = self._stream.total_elements() * sympy.Integer(
+        total_elements = self._stream.total_elements() * sympy.Integer(
             self.tile_row * self.tile_col * self.n_byte
         )
-        write_traffic = self.wdata.total_elements() * sympy.Integer(
-            self.tile_row * self.tile_col * self.n_byte
-        )
-        return sympy.Add(read_traffic, write_traffic)
+        return total_elements
 
     def on_chip_requirement(self, count_fifos: bool = False) -> sympy.Expr:
         """Return the on-chip memory requirement for this operation."""
-        staging_area = sympy.Integer(self.tile_row * self.tile_col * self.n_byte)
-        read_on_chip = sympy.Integer(0) if self.raddr is None else staging_area
-        write_on_chip = sympy.Integer(0) if self.wdata is None else staging_area
-
-        return sympy.Add(read_on_chip, write_on_chip)
+        return sympy.Integer(self.tile_row * self.tile_col * self.n_byte)
 
 
 class OffChipLoad(StepOps):
@@ -2084,9 +2042,9 @@ class Reshape(StepOps):
 
         in_stream: Stream = get_stream(input)
         self.input_stream_rank = in_stream.rank
-        assert (
-            reshape_rank > 0 and in_stream.shape[reshape_rank] % chunk_size == 0
-        ) or (
+
+        rank_pos = in_stream.rank - reshape_rank
+        assert (reshape_rank > 0 and in_stream.shape[rank_pos] % chunk_size == 0) or (
             reshape_rank == 0 and (pad_fn is not None or chunk_size == 1)
         ), "The chunk size must be a divisor of the shape at the reshape rank if the rank being split is not the innermost"
 
@@ -2100,7 +2058,6 @@ class Reshape(StepOps):
             reshape_rank >= 0 and reshape_rank <= in_stream.rank
         ), f"Reshape rank must be between 0 and {in_stream.rank}."
 
-        rank_pos = in_stream.rank - reshape_rank
         if isinstance(in_stream.shape[rank_pos], DynDim):
             if add_outer_dim:  # this means in_stream.rank == 0
                 outer_most_expr: sympy.Expr = in_stream.shape[rank_pos].expr

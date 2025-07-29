@@ -56,6 +56,20 @@ class Uint32(ElementTP):
         return "Uint32"
 
 
+class Uint64(ElementTP):
+    def __eq__(self, value):
+        if isinstance(value, Uint64):
+            return True
+        return False
+
+    def size_in_bytes(self) -> sympy.Expr:
+        """Return the size of Uint64 in bytes."""
+        return sympy.Integer(8)
+
+    def __str__(self) -> str:
+        return "Uint64"
+
+
 @dataclass
 class DynTile:
     tile_dtype: ElementTP

@@ -2,9 +2,10 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 import torch
 from typing import List, Tuple, Union
-from step_py.datatype import MultiHot, Index, Stream, Tile, Uint32
+from step_py.datatype import MultiHot, Index, Stream, Tile, Uint32, Uint64
 from step_py.ops import StepOps, get_stream
 from networkx import MultiDiGraph
+import sympy
 
 
 class PrinterContext(StepOps):
@@ -119,6 +120,75 @@ class ConsumerContext(StepOps):
     def on_chip_requirement(self, count_fifos: bool = False) -> int:
         """Return the on-chip memory requirement for this operation."""
         return 0
+
+
+class ExpertAddrGen(StepOps):
+    _input: Union[StepOps, Tuple[StepOps, int]]
+    num_tile_per_expert: int
+    expert_addr_base: int
+    _stream: Stream
+
+    def __init__(
+        self,
+        graph: MultiDiGraph,
+        input: Union[StepOps, Tuple[StepOps, int]],
+        num_tile_per_expert: int,
+        expert_addr_base: int,
+    ):
+        super().__init__()
+        self._input = input
+        self.num_tile_per_expert = num_tile_per_expert
+        self.expert_addr_base = expert_addr_base
+        self._stream = Stream(
+            stream_dtype=Uint64(),
+            shape=get_stream(input).shape + (num_tile_per_expert, 1),
+        )
+
+        input_node = input if isinstance(input, StepOps) else input[0]
+        graph.add_edge(input_node, self)
+
+    @property
+    def stream(self) -> Stream:
+        """The stream of the operation."""
+        return self._stream
+
+    @property
+    def stream_list(self) -> List[Stream]:
+        return [self._stream]
+
+    @property
+    def input(self) -> Union["StepOps", Tuple["StepOps", int]]:
+        return self._input
+
+    @property
+    def input_list(self) -> List[Union["StepOps", Tuple["StepOps", int]]]:
+        return [self._input]
+
+    def stream_idx(self, idx: int) -> Stream:
+        raise NotImplementedError(
+            "Shouldn't be called for nodes that only have a single output stream"
+        )
+
+    def __str__(self):
+        cls = self.__class__.__name__
+        return f"{cls}_{self.instance_id}"
+
+    def replace_input(
+        self,
+        org_input: Union["StepOps", Tuple["StepOps", int]],
+        new_input: Union["StepOps", Tuple["StepOps", int]],
+    ):
+        if get_stream(self._input) != get_stream(new_input):
+            raise ValueError("The shape of the input stream shouldn't change")
+        self._input = new_input
+
+    def off_chip_traffic(self) -> sympy.Expr:
+        """Return the off-chip traffic for this operation."""
+        return sympy.Integer(0)
+
+    def on_chip_requirement(self, count_fifos: bool = False) -> sympy.Expr:
+        """Return the on-chip memory requirement for this operation."""
+        return sympy.Integer(0)
 
 
 class SelectGen(StepOps):
