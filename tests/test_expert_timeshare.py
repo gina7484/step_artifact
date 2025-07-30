@@ -729,7 +729,7 @@ def call_timeshare_mn_mk_gemm_reshape(
     if simulate_rust in ["full", "timing"]:
         hbm_config = HBMConfig(64, 8, 2, 2, 1, 14)
         sim_config = SimConfig(
-            channel_depth=1, functional_sim=simulate_rust == "full", mock_bf16=mock_bf16
+            channel_depth=2, functional_sim=simulate_rust == "full", mock_bf16=mock_bf16
         )
 
         if logging is None:
@@ -956,8 +956,8 @@ def test_timeshare_mn_mk_gemm_reshape():
                     input_tensor=input_tensor,
                     expert_indices=expert_indices,
                     model_config=model_config,
-                    simulate_rust=None,  # "timing",
-                    gold_check=False,
+                    simulate_rust="full",  # "timing",
+                    gold_check=True,
                     save_graph=False,
                     n_par_region=n_par_region,
                     mock_bf16=mock_bf16,
@@ -966,3 +966,9 @@ def test_timeshare_mn_mk_gemm_reshape():
             )
 
             # ------------ substitue symbols in the off_chip_traffic and on_chip_requirement ------------
+
+            # ------------ Print the results ------------
+            # print(f"Off-chip traffic: {off_chip_traffic}")
+            # print(f"On-chip requirement: {on_chip_requirement}")
+            print(f"Cycles: {cycles}")
+            print(f"Duration: {duration_s} s")

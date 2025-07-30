@@ -34,7 +34,7 @@ def infer_broadcast(graph: nx.MultiDiGraph) -> nx.MultiDiGraph:
 
     for node, dst_node_list in broadcast_nodes.items():
 
-        if isinstance(node, (FlatPartition, EagerMerge, Parallelize, Broadcast)):
+        if isinstance(node, (FlatPartition, EagerMerge, Parallelize)):
             if node.num_consumers < len(dst_node_list):
                 # This means there is broadcast happening in some of the output streams
                 # [TODO] Fix this for BinaryMap and DynStreamify
@@ -94,6 +94,8 @@ def infer_broadcast(graph: nx.MultiDiGraph) -> nx.MultiDiGraph:
                         continue
             else:
                 continue
+        elif isinstance(node, Broadcast):
+            continue
         else:
             assert isinstance(node, StepOps)
             src_node: StepOps = node

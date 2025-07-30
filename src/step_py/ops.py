@@ -1368,6 +1368,8 @@ class Parallelize(StepOps):
     parallelize_rank: int
     num_consumers: int
     per_region_input: int
+    switch_cycles: List[int]
+    write_back_mu: bool
     _stream: List[Stream]
 
     def __init__(
@@ -1377,12 +1379,18 @@ class Parallelize(StepOps):
         parallelize_rank: int,
         num_consumers: int,  # this is the par factor
         per_region_input: int,
+        switch_cycles: List[int] = None,
+        write_back_mu: bool = False,
     ):
         super().__init__()
         self._input = input
         self.parallelize_rank = parallelize_rank
         self.num_consumers = num_consumers
         self.per_region_input = per_region_input
+        self.switch_cycles = (
+            switch_cycles if switch_cycles is not None else [1] * num_consumers
+        )
+        self.write_back_mu = write_back_mu
 
         in_stream: Stream = get_stream(input)
         assert (

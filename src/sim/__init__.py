@@ -141,7 +141,7 @@ def to_pb_init_func(op_fn: init_fn.InitFn) -> func_pb2.InitFunc:
     return func_pb
 
 
-def to_pb_datatype(dtype: Union[Tile, Buffer, Select]) -> datatype_pb2.DataType:
+def to_pb_datatype(dtype: Union[Tile, Buffer, Select, Uint64]) -> datatype_pb2.DataType:
     if isinstance(dtype, (Tile, DynTile)):
         if isinstance(dtype.tile_dtype, Float32):
             dtype_pb = datatype_pb2.DataType()
@@ -179,6 +179,11 @@ def to_pb_datatype(dtype: Union[Tile, Buffer, Select]) -> datatype_pb2.DataType:
             return dtype_pb
 
         raise ValueError(f"Unsupported Select datatype({dtype})")
+    elif isinstance(dtype, Uint64):
+        dtype_pb = datatype_pb2.DataType()
+        dtype_pb.scalar_u64.CopyFrom(datatype_pb2.ScalarU64())
+        return dtype_pb
+    raise ValueError(f"Unsupported datatype({dtype})")
 
 
 # pylint: disable=no-member
@@ -537,6 +542,27 @@ def serialize(graph: MultiDiGraph, protobuf_file: str, functional: bool):
             flatpartition_pb.write_back_mu = op.write_back_mu
 
             operator.flat_partition.CopyFrom(flatpartition_pb)
+        elif isinstance(op, Parallelize):
+            parallelize_pb = ops_pb2.Parallelize()
+
+            if isinstance(op.input, Tuple):
+                input_node, idx = op.input
+                parallelize_pb.input_stream_idx = idx
+                parallelize_pb.input_id = input_node.instance_id
+            else:
+                parallelize_pb.input_id = op.input.instance_id
+
+            parallelize_pb.parallelize_rank = op.parallelize_rank
+            parallelize_pb.num_consumers = op.num_consumers
+            parallelize_pb.per_region_input = op.per_region_input
+            parallelize_pb.switch_cycles.extend(list(op.switch_cycles))
+            parallelize_pb.write_back_mu = op.write_back_mu
+
+            parallelize_pb.input_dtype.CopyFrom(
+                to_pb_datatype(op.stream_idx(0).stream_dtype)
+            )
+
+            operator.parallelize.CopyFrom(parallelize_pb)
         elif isinstance(op, FlatReassemble):
             flatreassemble_pb = ops_pb2.FlatReassemble()
 
