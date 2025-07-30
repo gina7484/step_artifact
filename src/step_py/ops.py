@@ -745,9 +745,15 @@ class BinaryMapAccum(StepOps):
         in2_stream: Stream = get_stream(in2)
 
         assert rank > 0, "Rank must be greater than 0."
-        assert (
-            in1_stream.shape == in2_stream.shape
-        ), f"Input streams must have the same shape. {in1_stream.shape} != {in2_stream.shape}"
+        for in1_dim, in2_dim in zip(in1_stream.shape, in2_stream.shape):
+            if isinstance(in1_dim, DynDim) and isinstance(in2_dim, DynDim):
+                assert in1_dim.expr.equals(
+                    in2_dim.expr
+                ), f"Input streams must have the same shape. {in1_dim.expr} \n!=\n{in2_dim.expr}"
+            else:
+                assert (
+                    in1_dim == in2_dim
+                ), f"Input streams must have the same shape. {in1_dim} \n!=\n{in2_dim}"
 
         self._stream = Stream(
             stream_dtype=self.fn.apply(
@@ -1352,6 +1358,126 @@ class DynStreamify(StepOps):
         return sympy.Add(buffer_size, tile_size)
 
 
+class Parallelize(StepOps):
+    """
+    [Da,...,D0] x 1 -> [Da//par, ..., D0] x par
+    b = parallelize rank
+    """
+
+    _input: Union[StepOps, Tuple[StepOps, int]]
+    parallelize_rank: int
+    num_consumers: int
+    per_region_input: int
+    _stream: List[Stream]
+
+    def __init__(
+        self,
+        graph: MultiDiGraph,
+        input: Union[StepOps, Tuple[StepOps, int]],
+        parallelize_rank: int,
+        num_consumers: int,  # this is the par factor
+        per_region_input: int,
+    ):
+        super().__init__()
+        self._input = input
+        self.parallelize_rank = parallelize_rank
+        self.num_consumers = num_consumers
+        self.per_region_input = per_region_input
+
+        in_stream: Stream = get_stream(input)
+        assert (
+            parallelize_rank == in_stream.rank
+        ), "Parallelize rank must be the same as the rank of the input stream"
+
+        if isinstance(in_stream.shape[0], DynDim):
+            # As the cases for use, we sum all the parallel regions, we simply do a truediv
+            self._stream = [
+                Stream(
+                    stream_dtype=in_stream.stream_dtype,
+                    shape=(in_stream.shape[0] / num_consumers,) + in_stream.shape[1:],
+                )
+                for i in range(num_consumers)
+            ]
+
+        else:
+            if in_stream.shape[0] % (num_consumers * per_region_input) != 0:
+                raise NotImplementedError(
+                    "The symbolic shape for (in_stream.shape[0] % (num_consumers * per_region_input) != 0) is not supported yet "
+                )
+            else:
+                self._stream = [
+                    Stream(
+                        stream_dtype=in_stream.stream_dtype,
+                        shape=(in_stream.shape[0] // num_consumers,)
+                        + in_stream.shape[1:],
+                    )
+                    for i in range(num_consumers)
+                ]
+
+        input_node = input if isinstance(input, StepOps) else input[0]
+        graph.add_edge(input_node, self)
+
+    @property
+    def stream(self) -> Stream:
+        raise NotImplementedError(
+            "This property shouldn't be used for nodes with multiple output streams"
+        )
+
+    @property
+    def stream_list(self) -> List[Stream]:
+        return self._stream
+
+    @property
+    def input(self) -> Union["StepOps", Tuple["StepOps", int]]:
+        return self._input
+
+    @property
+    def input_list(self) -> List[Union["StepOps", Tuple["StepOps", int]]]:
+        return [self._input]
+
+    def stream_idx(self, idx: int) -> Stream:
+        return self._stream[idx]
+
+    def __str__(self):
+        cls = self.__class__.__name__
+        return f"{cls}_{self.instance_id} ({self.parallelize_rank} D)"
+
+    def replace_input(
+        self,
+        org_input: Union["StepOps", Tuple["StepOps", int]],
+        new_input: Union["StepOps", Tuple["StepOps", int]],
+    ):
+        if self.input == org_input:
+            if get_stream(self.input) != get_stream(new_input):
+                raise ValueError("The shape of the input stream shouldn't change")
+            self._input = new_input
+        else:
+            raise ValueError("Wrong org_input")
+
+    def off_chip_traffic(self) -> sympy.Expr:
+        """Return the off-chip traffic for this operation."""
+        return sympy.Integer(0)
+
+    def on_chip_requirement(self, count_fifos: bool = False) -> sympy.Expr:
+        """Return the on-chip memory requirement for this operation."""
+        if not count_fifos:
+            return sympy.Integer(0)
+
+        # Get the input stream
+        in_stream = get_stream(self._input)
+
+        # Check that the input stream's datatype is a Tile
+        assert isinstance(
+            in_stream.stream_dtype, (Tile, Select)
+        ), "Input stream must be a Tile or Select type."
+
+        # Calculate the size of the input stream's datatype
+        in_tile_size = in_stream.stream_dtype.size_in_bytes()
+
+        # Return the size times (num_consumers + 1) for FIFO requirements
+        return sympy.Mul(in_tile_size, sympy.Integer(self.num_consumers + 1))
+
+
 class FlatPartition(StepOps):
     _input: Union[StepOps, Tuple[StepOps, int]]
     control: Union[StepOps, Tuple[StepOps, int]]
@@ -1538,6 +1664,18 @@ class EagerMerge(StepOps):
         """
         assert idx in [0, 1], "Invalid stream index"
         return self._stream[idx]
+
+    def data_stream(self) -> Stream:
+        return self._stream[0]
+
+    def data_tuple(self) -> Tuple[StepOps, int]:
+        return (self, 0)
+
+    def select_tuple(self) -> Tuple[StepOps, int]:
+        return (self, 1)
+
+    def select_stream(self) -> Stream:
+        return self._stream[1]
 
     def __str__(self):
         cls = self.__class__.__name__

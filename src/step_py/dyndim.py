@@ -50,6 +50,11 @@ class DynDim:
             return DynDim(self.expr // other.expr)  # type: ignore
         return DynDim(self.expr // other)  # type: ignore
 
+    def __truediv__(self, other: Union[int, "DynDim"]) -> "DynDim":
+        if isinstance(other, DynDim):
+            return DynDim(self.expr / other.expr)  # type: ignore
+        return DynDim(self.expr / other)  # type: ignore
+
     def __mod__(self, other: Union[int, "DynDim"]) -> "DynDim":
         if isinstance(other, DynDim):
             return DynDim(self.expr % other.expr)  # type: ignore
