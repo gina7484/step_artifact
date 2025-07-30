@@ -34,7 +34,7 @@ def infer_broadcast(graph: nx.MultiDiGraph) -> nx.MultiDiGraph:
 
     for node, dst_node_list in broadcast_nodes.items():
 
-        if isinstance(node, (FlatPartition, EagerMerge)):
+        if isinstance(node, (FlatPartition, EagerMerge, Parallelize, Broadcast)):
             if node.num_consumers < len(dst_node_list):
                 # This means there is broadcast happening in some of the output streams
                 # [TODO] Fix this for BinaryMap and DynStreamify
@@ -49,6 +49,20 @@ def infer_broadcast(graph: nx.MultiDiGraph) -> nx.MultiDiGraph:
                                     dst_node
                                 )
 
+                dst_node_set = set(dst_node_list)
+
+                incoming_edge_per_dst_node = {}
+                for unique_dst_node in dst_node_set:
+                    incoming_edge_per_dst_node[unique_dst_node] = graph.number_of_edges(
+                        node, unique_dst_node
+                    )
+
+                lowest_existing_edge_key = {}
+                for key, value in incoming_edge_per_dst_node.items():
+                    lowest_existing_edge_key[key] = 0
+
+                for idx, dst_node_list_i in enumerate(regrouped_dst_node_list):
+                    print(f"idx: {idx}, dst_node_list_i: {dst_node_list_i}")
                 for idx, dst_node_list_i in enumerate(regrouped_dst_node_list):
 
                     if len(dst_node_list_i) > 1:
@@ -60,7 +74,17 @@ def infer_broadcast(graph: nx.MultiDiGraph) -> nx.MultiDiGraph:
                         )
 
                         for broadcast_idx, dst_node in enumerate(dst_node_list_i):
-                            edges_to_remove.append((node, dst_node))
+                            if incoming_edge_per_dst_node[dst_node] == 1:
+                                edges_to_remove.append((node, dst_node))
+                            else:
+                                assert (
+                                    lowest_existing_edge_key[dst_node]
+                                    < incoming_edge_per_dst_node[dst_node]
+                                )
+                                edges_to_remove.append(
+                                    (node, dst_node, lowest_existing_edge_key[dst_node])
+                                )
+                                lowest_existing_edge_key[dst_node] += 1
                             dst_node.replace_input(
                                 org_input=src_node, new_input=(broadcast, broadcast_idx)
                             )
@@ -70,8 +94,6 @@ def infer_broadcast(graph: nx.MultiDiGraph) -> nx.MultiDiGraph:
                         continue
             else:
                 continue
-        # elif isinstance(node, Parallelizer):  # TODO
-        #     pass
         else:
             assert isinstance(node, StepOps)
             src_node: StepOps = node

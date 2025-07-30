@@ -1,9 +1,28 @@
-from typing import Dict, Optional, Set, List
+from typing import Dict, Optional, Set, List, Tuple, Union
 import networkx as nx
 from networkx.drawing.nx_agraph import to_agraph
 from pygraphviz import AGraph
 
+from step_py.dyndim import DynDim
 from step_py.ops import StepOps
+
+
+def shape_to_str(
+    shape: Tuple[Union[int, DynDim], ...], dyndim_max_length: int = 10
+) -> str:
+    str_shape = []
+    for dim in shape:
+        if isinstance(dim, DynDim):
+            """Truncate string to max_length characters, adding '...' if truncated."""
+            dim_str = str(dim.expr)
+            if len(dim_str) <= dyndim_max_length:
+                str_shape.append(dim_str)
+            else:
+                str_shape.append(dim_str[: dyndim_max_length - 3] + "...")
+        else:
+            str_shape.append(dim)
+
+    return str(str_shape)
 
 
 def save_graph_format(
@@ -59,7 +78,7 @@ def save_graph_format(
                     "-------------",
                     "output stream shape:",
                 ]
-                + [str(out_i.shape) for out_i in node_id.stream_list]
+                + [shape_to_str(out_i.shape) for out_i in node_id.stream_list]
                 + ["data type:", str(node_id.stream_list[0].stream_dtype)]
             )
         elif class_name in ["EagerMerge"]:
@@ -68,8 +87,8 @@ def save_graph_format(
                     str(node_id),
                     "-------------",
                     "output stream shape:",
-                    f"data: {node_id.stream_idx(0).shape}",
-                    f"sel: {node_id.stream_idx(1).shape}",
+                    f"data: {shape_to_str(node_id.stream_idx(0).shape)}",
+                    f"sel: {shape_to_str(node_id.stream_idx(1).shape)}",
                     "data type:",
                     str(node_id.stream_idx(0).stream_dtype),
                     "sel type:",
@@ -82,7 +101,7 @@ def save_graph_format(
                     str(node_id),
                     "-------------",
                     "output stream shape:",
-                    str(node_id.stream.shape),
+                    shape_to_str(node_id.stream.shape),
                     "data type:",
                     str(node_id.stream.stream_dtype),
                 ]
