@@ -37,6 +37,8 @@ def ws_tile_mn_mk_gemm_reshape(
     tile_F: int,  # Gate & Up (K), Down (N)
     mock_bf16: bool,
 ) -> OffChipStore:
+    par_dispatch = 1
+
     F = model_config.moe_inter_dim
     D = model_config.dim
 
@@ -55,7 +57,7 @@ def ws_tile_mn_mk_gemm_reshape(
         ),
         tile_row=1,
         tile_col=D,
-        par_dispatch=4,
+        par_dispatch=par_dispatch,
         mock_bf16=mock_bf16,
     )
 
@@ -88,7 +90,7 @@ def ws_tile_mn_mk_gemm_reshape(
         out_shape_tiled=(batch, model_config.n_activated_experts),
         tile_row=1,
         tile_col=1,
-        par_dispatch=4,
+        par_dispatch=par_dispatch,
         mock_bf16=mock_bf16,
     )
 
@@ -143,7 +145,7 @@ def ws_tile_mn_mk_gemm_reshape(
             init_fn.Empty(shape=(0, D), dtype=Float32()),
             1,
             False,
-            1024,
+            accum_compute_bw,
         )
         for i in range(model_config.n_routed_experts)
     ]  # [dyn_1 * (Dyn + tile_N -1) // tile_N] of tile_N x D
@@ -174,7 +176,7 @@ def ws_tile_mn_mk_gemm_reshape(
             out_shape_tiled=(F // tile_F, 1),
             tile_row=D,
             tile_col=tile_F,
-            par_dispatch=4,
+            par_dispatch=par_dispatch,
             mock_bf16=mock_bf16,
         )
         for i in range(model_config.n_routed_experts)
@@ -222,7 +224,7 @@ def ws_tile_mn_mk_gemm_reshape(
             out_shape_tiled=(F // tile_F, 1),
             tile_row=D,
             tile_col=tile_F,
-            par_dispatch=4,
+            par_dispatch=par_dispatch,
             mock_bf16=mock_bf16,
         )
         for i in range(model_config.n_routed_experts)
@@ -295,7 +297,7 @@ def ws_tile_mn_mk_gemm_reshape(
             out_shape_tiled=(F // tile_F, D // D),
             tile_row=tile_F,
             tile_col=D,
-            par_dispatch=4,
+            par_dispatch=par_dispatch,
             mock_bf16=mock_bf16,
         )
         for i in range(model_config.n_routed_experts)
@@ -438,7 +440,7 @@ def ws_tile_mn_mk_gemm_reshape(
             reshape_rank=0,
             write_back_mu=True,
         ),
-        par_dispatch=4,
+        par_dispatch=par_dispatch,
         store_file_name="output",
     )  # [1, N, 1] (tile: [1, D])
 
@@ -530,9 +532,9 @@ def call_ws_tile_mn_mk_gemm_reshape(
     duration_s = 0
 
     if simulate_rust in ["full", "timing"]:
-        hbm_config = HBMConfig(64, 8, 2, 2, 1, 14)
+        hbm_config = HBMConfig(64, 32, 2, 2, 1, 14)
         sim_config = SimConfig(
-            channel_depth=1, functional_sim=simulate_rust == "full", mock_bf16=mock_bf16
+            channel_depth=2, functional_sim=simulate_rust == "full", mock_bf16=mock_bf16
         )
 
         if logging is None:
@@ -692,13 +694,13 @@ def run_ws_tile_mn_mk(
     # For Gate & Up linear, we use TileMN. For Down linear, we use TileMK.
 
     # ------------ Compute Bandwidths ------------
-    GATE_COMPUTE_BW = 6400
-    UP_COMPUTE_BW = 6400
-    ACT_FN_COMPUTE_BW = 6400
-    MULT_COMPUTE_BW = 6400
-    DOWN_COMPUTE_BW = 6400
-    WEIGHT_SCALE_COMPUTE_BW = 6400
-    ACCUM_COMPUTE_BW = 6400
+    GATE_COMPUTE_BW = 4096
+    UP_COMPUTE_BW = 4096
+    ACT_FN_COMPUTE_BW = 4096
+    MULT_COMPUTE_BW = 4096
+    DOWN_COMPUTE_BW = 4096
+    WEIGHT_SCALE_COMPUTE_BW = 4096
+    ACCUM_COMPUTE_BW = 4096
 
     # ------------ Input generation ------------
     input_tensor = torch.randn(B, model_config.dim)

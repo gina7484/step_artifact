@@ -17,124 +17,7 @@ from utils.draw_graph import save_graph_format
 from utils.moe import *
 
 
-def test_random_offchip_load():
-    # configuration
-    dim = 32
-    moe_inter_dim = 128
-    num_experts = 8
-
-    tile_size = 32
-    num_tile_per_expert = moe_inter_dim // tile_size
-
-    num_selected_experts = 4
-
-    # Expert selection (8 experts)
-    routing_expert_selection = torch.tensor(
-        [
-            [0, 1, 0, 0, 0, 0, 0, 0],  # 1
-            [1, 0, 0, 0, 0, 0, 0, 0],  # 0
-            [0, 0, 0, 0, 1, 0, 0, 0],  # 4
-            [0, 0, 0, 0, 0, 0, 0, 1],  # 7
-        ]
-    )  # [4,8]
-
-    # Weights for experts
-    weights = torch.randn(num_experts * dim, moe_inter_dim)
-
-    # Step graph
-    graph = MultiDiGraph()
-
-    control = SelectGen(
-        is_multihot=True,
-        tensor=routing_expert_selection,
-        n=8,
-    )  # [1,4]
-
-    flattened_control = Flatten(
-        graph=graph,
-        input=control,
-        min_rank=0,
-        max_rank=1,
-    )  # [4]
-
-    expert_addr_gen = ExpertAddrGen(
-        graph=graph,
-        input=flattened_control,
-        num_tile_per_expert=num_tile_per_expert,
-        expert_addr_base=0,
-    )  # [4,4,1]
-
-    random_off_chip_load = RandomOffChipLoad(
-        graph=graph,
-        underlying=weights,
-        raddr=expert_addr_gen,
-        tile_row=dim,
-        tile_col=tile_size,
-        base_addr_byte=0,
-        par_dispatch=4,
-    )
-    # [4,4,1]
-
-    # to mimic the behavior of accum
-    accum_weights = Flatten(
-        graph=graph,
-        input=random_off_chip_load,
-        min_rank=0,
-        max_rank=1,
-    )  # [4,4]
-
-    reshaped_off_chip_load = Reshape(
-        graph=graph,
-        input=accum_weights,
-        chunk_size=num_selected_experts,
-        reshape_rank=1,
-        write_back_mu=True,
-    )  # [1,4,4]
-
-    output = OffChipStore(
-        graph=graph,
-        input=reshaped_off_chip_load,
-        par_dispatch=4,
-        store_file_name="output",
-    )
-
-    print(output.get_untiled_shape())  # [4*32,128]
-
-    graph = infer_broadcast(graph)
-
-    OUTPUT_FILENAME = "test_random_offchip_load"
-    save_graph_format(graph, OUTPUT_FILENAME, ["png"])
-
-    # HBMConfig, SimConfig
-    hbm_config = HBMConfig(64, 8, 2, 2, 1, 14)
-    sim_config = SimConfig(channel_depth=64, functional_sim=True, mock_bf16=False)
-
-    cycles, duration_ms, duration_s = simulate(
-        graph,
-        False,  # logging
-        hbm_config,
-        sim_config,
-        "/home/ginasohn/step_tl/graph.pb",
-    )
-
-    # Gold generation
-    # Define the slice ranges (corrected to get 32 elements each)
-    slice_ranges = [
-        slice(32, 64),  # [32:64] - indices 32 to 63 (32 elements)
-        slice(0, 32),  # [0:32] - indices 0 to 31 (32 elements)
-        slice(128, 160),  # [4*32:5*32] - indices 128 to 159 (32 elements)
-        slice(224, 256),  # [7*32:8*32] - indices 224 to 255 (32 elements)
-    ]
-
-    # Method 1: Using list comprehension and torch.stack
-    gathered_slices = [weights[slice_range, :] for slice_range in slice_ranges]
-    result_tensor = torch.cat(gathered_slices, dim=0)  # [4*32, 128]
-
-    # Verification
-    check_gold_tensor(output.store_file_name, result_tensor.contiguous())
-
-
-def timeshare_mn_mk_gemm_reshape(
+def timeshare_mn_mk_gemm_reshape_fixed_fanout(
     step_graph: MultiDiGraph,
     model_config,
     batch: int,
@@ -161,6 +44,8 @@ def timeshare_mn_mk_gemm_reshape(
     """
     Constructs the STeP graph
     """
+    assert model_config.n_routed_experts % n_par_region == 0
+    expert_per_region = model_config.n_routed_experts // n_par_region
 
     F = model_config.moe_inter_dim
     D = model_config.dim
@@ -269,65 +154,37 @@ def timeshare_mn_mk_gemm_reshape(
 
     # ------------ Stage 5: Reroute input features ------------
     # 5.1: Merge the input features
-    # - input stream shape:   [(Dyn + tile_N -1) // tile_N] x n_routed_experts (tile: [tile_N, D])
-    # - output stream shape:  [Σ((Dyn + tile_N -1) // tile_N)] (tile: [tile_N, D])
-    merged_feature_stream = EagerMerge(
-        step_graph,
-        expert_feature_streams,
-        input_rank=0,
-    )
-
-    # 5.2: Parallelize the data and selection
-    # - input stream shape:   [Σ((Dyn + tile_N -1) // tile_N)] (tile: [tile_N, D])
-    # - output stream shape:  [Σ((Dyn + tile_N -1) // tile_N) / n_par_region] x n_par_region (tile: [tile_N, D])
-    parallelized_feature_stream = Parallelize(
-        graph=step_graph,
-        input=merged_feature_stream.data_tuple(),
-        parallelize_rank=0,
-        num_consumers=n_par_region,  # par_factor
-        per_region_input=1,
-    )
-
-    # - input stream shape:   [Σ((Dyn + tile_N -1) // tile_N)]                               (dtype: Multihot)
-    # - output stream shape:  [Σ((Dyn + tile_N -1) // tile_N) / n_par_region] x n_par_region (dtype: Multihot)
-    parallelized_selection_stream = Parallelize(
-        graph=step_graph,
-        input=merged_feature_stream.select_tuple(),
-        parallelize_rank=0,
-        num_consumers=n_par_region,  # par_factor
-        per_region_input=1,
-    )
-
-    # The broadcast infer logic gets too complicated if we try to make it also infer cases where 1:M operator is
-    # fed into N:1 operator. Therefore, for these cases, we will manually broadcast.
-    broadcasted_par_sel_stream = [
-        Broadcast(
-            graph=step_graph,
-            input=(parallelized_selection_stream, i),
-            num_consumers=2,
+    # - input stream shape:         [(Dyn + tile_N -1) // tile_N] x n_routed_experts (tile: [tile_N, D])
+    # - output stream shape: (data) [Σ((Dyn + tile_N -1) // tile_N)] x n_par_region (tile: [tile_N, D])
+    #                        (sel)  [Σ((Dyn + tile_N -1) // tile_N)] x n_par_region (dtype: Multihot)
+    merged_feature_streams = [
+        EagerMerge(
+            step_graph,
+            expert_feature_streams[i * expert_per_region : (i + 1) * expert_per_region],
+            input_rank=0,
         )
         for i in range(n_par_region)
     ]
 
-    # 5.3: Repeat the input features
-    # - input stream shape:   [Σ((Dyn + tile_N -1) // tile_N) / n_par_region]              x n_par_region (tile: [tile_N, D])
-    # - output stream shape:  [Σ((Dyn + tile_N -1) // tile_N) / n_par_region, F // tile_F] x n_par_region (tile: [tile_N, D])
+    # 5.2: Repeat the input features
+    # - input stream shape:   [Σ((Dyn + tile_N -1) // tile_N)]              x n_par_region (tile: [tile_N, D])
+    # - output stream shape:  [Σ((Dyn + tile_N -1) // tile_N), F // tile_F] x n_par_region (tile: [tile_N, D])
     repeated_feature_streams = [
         RepeatStatic(
             graph=step_graph,
-            input=(parallelized_feature_stream, i),
+            input=merged_feature_streams[i].data_tuple(),
             repeat_factor=F // tile_F,
         )
         for i in range(n_par_region)
     ]
 
-    # 5.4: Generate addresses for expert loading
-    # - input stream shape:   [Σ((Dyn + tile_N -1) // tile_N) / n_par_region]                 x n_par_region (tile: [tile_N, D])
-    # - output stream shape:  [Σ((Dyn + tile_N -1) // tile_N) / n_par_region, F // tile_F, 1] x n_par_region (tile: [tile_N, D])
+    # 5.3: Generate addresses for expert loading
+    # - input stream shape:   [Σ((Dyn + tile_N -1) // tile_N)]                 x n_par_region (dtype: Multihot)
+    # - output stream shape:  [Σ((Dyn + tile_N -1) // tile_N), F // tile_F, 1] x n_par_region (dtype: u64)
     expert_addr_gen = [
         ExpertAddrGen(
             graph=step_graph,
-            input=(broadcasted_par_sel_stream[i], 0),
+            input=merged_feature_streams[i].select_tuple(),
             num_tile_per_expert=F // tile_F,
             expert_addr_base=0,
         )
@@ -336,24 +193,24 @@ def timeshare_mn_mk_gemm_reshape(
 
     # ------------ Stage 6: Load up parameters ------------
     # - tensor shape: [D, F]
-    # - raddr stream shape:  [Σ((Dyn + tile_N -1) // tile_N) / n_par_region, F // tile_F, 1]
-    # - output stream shape: [Σ((Dyn + tile_N -1) // tile_N) / n_par_region, F // tile_F, 1] (tile: [D, tile_F])
+    # - raddr stream shape:  [Σ((Dyn + tile_N -1) // tile_N), F // tile_F, 1]
+    # - output stream shape: [Σ((Dyn + tile_N -1) // tile_N), F // tile_F, 1] (tile: [D, tile_F])
     up_loads = [
         RandomOffChipLoad(
             graph=step_graph,
-            raddr=raddr_stream,
-            underlying=w_up_list,
+            raddr=expert_addr_gen[i],
+            underlying=w_up_list[i],
             tile_row=D,
             tile_col=tile_F,
             base_addr_byte=0,
             par_dispatch=par_dispatch,
             mock_bf16=mock_bf16,
         )
-        for raddr_stream in expert_addr_gen
+        for i in range(n_par_region)
     ]
 
-    # - input stream shape:   [Σ((Dyn + tile_N -1) // tile_N) / n_par_region, F // tile_F, 1] (tile: [D, tile_F])
-    # - output stream shape:  [Σ((Dyn + tile_N -1) // tile_N) / n_par_region, F // tile_F]    (tile: [D, tile_F])
+    # - input stream shape:   [Σ((Dyn + tile_N -1) // tile_N), F // tile_F, 1] (tile: [D, tile_F])
+    # - output stream shape:  [Σ((Dyn + tile_N -1) // tile_N), F // tile_F]    (tile: [D, tile_F])
     ready_up_loads = [
         Flatten(
             graph=step_graph,
@@ -365,9 +222,9 @@ def timeshare_mn_mk_gemm_reshape(
     ]
 
     # ------------ Stage 7: Compute the up features ------------
-    # - input stream shape:   [Σ((Dyn + tile_N -1) // tile_N) / n_par_region, F // tile_F] (tile: [tile_N, D])
-    # - weight stream shape:  [Σ((Dyn + tile_N -1) // tile_N) / n_par_region, F // tile_F] (tile: [D, tile_F])
-    # - output stream shape:  [Σ((Dyn + tile_N -1) // tile_N) / n_par_region, F // tile_F] (tile: [tile_N, tile_F])
+    # - input stream shape:   [Σ((Dyn + tile_N -1) // tile_N), F // tile_F] (tile: [tile_N, D])
+    # - weight stream shape:  [Σ((Dyn + tile_N -1) // tile_N), F // tile_F] (tile: [D, tile_F])
+    # - output stream shape:  [Σ((Dyn + tile_N -1) // tile_N), F // tile_F] (tile: [tile_N, tile_F])
     up_feature_streams = [
         BinaryMap(
             step_graph,
@@ -382,24 +239,24 @@ def timeshare_mn_mk_gemm_reshape(
 
     # ------------ Stage 8: Load gate parameters ------------
     # - tensor shape: [D, F]
-    # - raddr stream shape:  [Σ((Dyn + tile_N -1) // tile_N) / n_par_region, F // tile_F, 1]
-    # - output stream shape: [Σ((Dyn + tile_N -1) // tile_N) / n_par_region, F // tile_F, 1] (tile: [D, tile_F])
+    # - raddr stream shape:  [Σ((Dyn + tile_N -1) // tile_N), F // tile_F, 1]
+    # - output stream shape: [Σ((Dyn + tile_N -1) // tile_N), F // tile_F, 1] (tile: [D, tile_F])
     gate_loads = [
         RandomOffChipLoad(
             graph=step_graph,
-            raddr=raddr_stream,
-            underlying=w_gate_list,
+            raddr=expert_addr_gen[i],
+            underlying=w_gate_list[i],
             tile_row=D,
             tile_col=tile_F,
             base_addr_byte=0,
             par_dispatch=par_dispatch,
             mock_bf16=mock_bf16,
         )
-        for raddr_stream in expert_addr_gen
+        for i in range(n_par_region)
     ]
 
-    # - input stream shape:   [Σ((Dyn + tile_N -1) // tile_N) / n_par_region, F // tile_F, 1] (tile: [D, tile_F])
-    # - output stream shape:  [Σ((Dyn + tile_N -1) // tile_N) / n_par_region, F // tile_F]    (tile: [D, tile_F])
+    # - input stream shape:   [Σ((Dyn + tile_N -1) // tile_N), F // tile_F, 1] (tile: [D, tile_F])
+    # - output stream shape:  [Σ((Dyn + tile_N -1) // tile_N), F // tile_F]    (tile: [D, tile_F])
     ready_gate_loads = [
         Flatten(
             graph=step_graph,
@@ -411,9 +268,9 @@ def timeshare_mn_mk_gemm_reshape(
     ]
 
     # ------------ Stage 8: Compute the gate features ------------
-    # - input stream shape:   [Σ((Dyn + tile_N -1) // tile_N) / n_par_region, F // tile_F] (tile: [tile_N, D])
-    # - weight stream shape:  [Σ((Dyn + tile_N -1) // tile_N) / n_par_region, F // tile_F] (tile: [D, tile_F])
-    # - output stream shape:  [Σ((Dyn + tile_N -1) // tile_N) / n_par_region, F // tile_F] (tile: [tile_N, tile_F])
+    # - input stream shape:   [Σ((Dyn + tile_N -1) // tile_N), F // tile_F] (tile: [tile_N, D])
+    # - weight stream shape:  [Σ((Dyn + tile_N -1) // tile_N), F // tile_F] (tile: [D, tile_F])
+    # - output stream shape:  [Σ((Dyn + tile_N -1) // tile_N), F // tile_F] (tile: [tile_N, tile_F])
     pre_act_gate_feature_streams = [
         BinaryMap(
             step_graph,
@@ -427,8 +284,8 @@ def timeshare_mn_mk_gemm_reshape(
     ]
 
     # ------------ Stage 9: Compute the activation ------------
-    # - input stream shape:   [Σ((Dyn + tile_N -1) // tile_N) / n_par_region, F // tile_F] (tile: [tile_N, tile_F])
-    # - output stream shape:  [Σ((Dyn + tile_N -1) // tile_N) / n_par_region, F // tile_F] (tile: [tile_N, tile_F])
+    # - input stream shape:   [Σ((Dyn + tile_N -1) // tile_N), F // tile_F] (tile: [tile_N, tile_F])
+    # - output stream shape:  [Σ((Dyn + tile_N -1) // tile_N), F // tile_F] (tile: [tile_N, tile_F])
     gate_feature_streams = [
         UnaryMap(
             graph=step_graph,
@@ -441,9 +298,9 @@ def timeshare_mn_mk_gemm_reshape(
     ]
 
     # ------------ Stage 10: Compute the projected features ------------
-    # - input1 stream shape:   [Σ((Dyn + tile_N -1) // tile_N) / n_par_region, F // tile_F] (tile: [tile_N, tile_F])
-    # - input2 stream shape:   [Σ((Dyn + tile_N -1) // tile_N) / n_par_region, F // tile_F] (tile: [tile_N, tile_F])
-    # - output stream shape:   [Σ((Dyn + tile_N -1) // tile_N) / n_par_region, F // tile_F] (tile: [tile_N, tile_F])
+    # - input1 stream shape:   [Σ((Dyn + tile_N -1) // tile_N), F // tile_F] (tile: [tile_N, tile_F])
+    # - input2 stream shape:   [Σ((Dyn + tile_N -1) // tile_N), F // tile_F] (tile: [tile_N, tile_F])
+    # - output stream shape:   [Σ((Dyn + tile_N -1) // tile_N), F // tile_F] (tile: [tile_N, tile_F])
     projected_feature_streams = [
         BinaryMap(
             step_graph, up_feature, gate_feature, map_fn.Mul(), False, mult_compute_bw
@@ -453,24 +310,24 @@ def timeshare_mn_mk_gemm_reshape(
 
     # ------------ Stage 11: Load down parameters ------------
     # - tensor shape: [F, D]
-    # - raddr stream shape:  [Σ((Dyn + tile_N -1) // tile_N) / n_par_region, F // tile_F, 1]
-    # - output stream shape: [Σ((Dyn + tile_N -1) // tile_N) / n_par_region, F // tile_F, 1] (tile: [tile_F, D])
+    # - raddr stream shape:  [Σ((Dyn + tile_N -1) // tile_N), F // tile_F, 1]
+    # - output stream shape: [Σ((Dyn + tile_N -1) // tile_N), F // tile_F, 1] (tile: [tile_F, D])
     down_loads = [
         RandomOffChipLoad(
             graph=step_graph,
-            raddr=raddr_stream,
-            underlying=w_down_list,
+            raddr=expert_addr_gen[i],
+            underlying=w_down_list[i],
             tile_row=tile_F,
             tile_col=D,
             base_addr_byte=0,
             par_dispatch=par_dispatch,
             mock_bf16=mock_bf16,
         )
-        for raddr_stream in expert_addr_gen
+        for i in range(n_par_region)
     ]
 
-    # - input stream shape:   [Σ((Dyn + tile_N -1) // tile_N) / n_par_region, F // tile_F, 1] (tile: [tile_F, D])
-    # - output stream shape:  [Σ((Dyn + tile_N -1) // tile_N) / n_par_region, F // tile_F] (tile: [tile_F, D])
+    # - input stream shape:   [Σ((Dyn + tile_N -1) // tile_N), F // tile_F, 1] (tile: [tile_F, D])
+    # - output stream shape:  [Σ((Dyn + tile_N -1) // tile_N), F // tile_F] (tile: [tile_F, D])
     ready_down_loads = [
         Flatten(
             graph=step_graph,
@@ -482,9 +339,9 @@ def timeshare_mn_mk_gemm_reshape(
     ]
 
     # ------------ Stage 12: Compute the down features ------------
-    # - input stream shape:   [Σ((Dyn + tile_N -1) // tile_N) / n_par_region, F // tile_F] (tile: [tile_N, tile_F])
-    # - weight stream shape:  [Σ((Dyn + tile_N -1) // tile_N) / n_par_region, F // tile_F] (tile: [tile_F, D])
-    # - output stream shape:  [Σ((Dyn + tile_N -1) // tile_N) / n_par_region]              (tile: [tile_N, D])
+    # - input stream shape:   [Σ((Dyn + tile_N -1) // tile_N), F // tile_F] (tile: [tile_N, tile_F])
+    # - weight stream shape:  [Σ((Dyn + tile_N -1) // tile_N), F // tile_F] (tile: [tile_F, D])
+    # - output stream shape:  [Σ((Dyn + tile_N -1) // tile_N)]              (tile: [tile_N, D])
     chunked_down_feature_streams = [
         BinaryMapAccum(
             step_graph,
@@ -500,38 +357,21 @@ def timeshare_mn_mk_gemm_reshape(
     ]
 
     # ------------ Additional Stage for Redistributing the experts -----------
-    # - input stream shape:  [Σ((Dyn + tile_N -1) // tile_N) / n_par_region] x n_par_region (tile: [tile_N, D])
-    # - output stream shape: [Σ((Dyn + tile_N -1) // tile_N)]                x 1            (tile: [tile_N, D])
-    merged_expert_results = EagerMerge(
-        graph=step_graph,
-        inputs=chunked_down_feature_streams,
-        input_rank=0,
-    )
-
-    # - input stream shape:   [Σ((Dyn + tile_N -1) // tile_N) / n_par_region] x n_par_region (dtype: Multihot)
-    # - control stream shape: [Σ((Dyn + tile_N -1) // tile_N)]                x 1            (dtype: Multihot)
-    # - output stream shape:  [Σ((Dyn + tile_N -1) // tile_N)]                x 1            (dtype: Multihot)
-    reassembled_expert_idx = FlatReassemble(
-        graph=step_graph,
-        inputs=[(broadcasted_par_sel_stream[i], 1) for i in range(n_par_region)],
-        control=merged_expert_results.select_tuple(),
-        reassemble_rank=0,
-        switch_cycles=[1 for _ in range(n_par_region)],
-        write_back_mu=False,
-    )
-
-    # - input stream shape:   [Σ((Dyn + tile_N -1) // tile_N)] x 1                (tile: [tile_N, D])
-    # - control stream shape: [Σ((Dyn + tile_N -1) // tile_N)] x 1                (dtype: Multihot)
+    # - output stream shape:  [Σ((Dyn + tile_N -1) // tile_N)] x n_par_region (tile: [tile_N, D])
+    # - control stream shape: [Σ((Dyn + tile_N -1) // tile_N)] x n_par_region (dtype: Multihot)
     # - output stream shape:  [  (Dyn + tile_N -1) // tile_N ] x n_routed_experts (tile: [tile_N, D])
-    per_expert_results = FlatPartition(
-        graph=step_graph,
-        input=merged_expert_results.data_tuple(),
-        control=reassembled_expert_idx,
-        partition_rank=0,
-        switch_cycles=[1 for _ in range(model_config.n_routed_experts)],
-        write_back_mu=False,
-        num_consumers=model_config.n_routed_experts,
-    )
+    per_expert_results = [
+        FlatPartition(
+            graph=step_graph,
+            input=chunked_down_feature_streams[i],
+            control=merged_feature_streams[i].select_tuple(),
+            partition_rank=0,
+            switch_cycles=[1 for _ in range(expert_per_region)],
+            write_back_mu=False,
+            num_consumers=expert_per_region,
+        )
+        for i in range(n_par_region)
+    ]
 
     # ------------ Stage 12.5: Partition & Retile outputs for each expert ------------
     # - input stream shape:  [(Dyn + tile_N -1) // tile_N] (tile: [tile_N, D])
@@ -539,7 +379,7 @@ def timeshare_mn_mk_gemm_reshape(
     down_feature_streams = [
         RetileStreamify(
             graph=step_graph,
-            input=(per_expert_results, i),
+            input=(per_expert_results[i // expert_per_region], i % expert_per_region),
             split_row=True,
             filter_mask=True,
         )
@@ -629,7 +469,7 @@ def timeshare_mn_mk_gemm_reshape(
     return output
 
 
-def call_timeshare_mn_mk_gemm_reshape(
+def call_timeshare_mn_mk_gemm_reshape_fixed_fanout(
     model_config,
     batch: int,
     gate_compute_bw: int,
@@ -666,7 +506,7 @@ def call_timeshare_mn_mk_gemm_reshape(
     # ------------ 1. Construct the graph ------------
     step_graph = MultiDiGraph()
 
-    output: OffChipStore = timeshare_mn_mk_gemm_reshape(
+    output: OffChipStore = timeshare_mn_mk_gemm_reshape_fixed_fanout(
         step_graph=step_graph,
         model_config=model_config,
         batch=batch,
@@ -733,7 +573,7 @@ def call_timeshare_mn_mk_gemm_reshape(
     if simulate_rust in ["full", "timing"]:
         hbm_config = HBMConfig(64, 32, 2, 2, 1, 14)
         sim_config = SimConfig(
-            channel_depth=2, functional_sim=simulate_rust == "full", mock_bf16=mock_bf16
+            channel_depth=1, functional_sim=simulate_rust == "full", mock_bf16=mock_bf16
         )
 
         if logging is None:
@@ -764,7 +604,7 @@ def call_timeshare_mn_mk_gemm_reshape(
     )
 
 
-def run_timeshare_mn_mk_gemm_reshape(
+def run_timeshare_mn_mk_gemm_reshape_fixed_fanout(
     tile_N: int,  # M (The number of requests to chunk for the GEMM in each expert)
     tile_F: int,  # K (The tile size used for the model_config.dim dimension)
     input_tensor,
@@ -774,6 +614,7 @@ def run_timeshare_mn_mk_gemm_reshape(
     gold_check,
     save_graph: bool,
     n_par_region: int,
+    flops: int,
     par_dispatch: int,
     mock_bf16: bool = False,
     logging: Optional[str] = None,
@@ -790,13 +631,13 @@ def run_timeshare_mn_mk_gemm_reshape(
     B = expert_indices.shape[0]
 
     # ------------ 1. Allocate FLOPs (Compute Bandwidths) ------------
-    GATE_COMPUTE_BW = 4096
-    UP_COMPUTE_BW = 4096
-    ACT_FN_COMPUTE_BW = 4096
-    MULT_COMPUTE_BW = 4096
-    DOWN_COMPUTE_BW = 4096
-    WEIGHT_SCALE_COMPUTE_BW = 4096
-    ACCUM_COMPUTE_BW = 4096
+    GATE_COMPUTE_BW = flops
+    UP_COMPUTE_BW = flops
+    ACT_FN_COMPUTE_BW = flops
+    MULT_COMPUTE_BW = flops
+    DOWN_COMPUTE_BW = flops
+    WEIGHT_SCALE_COMPUTE_BW = flops
+    ACCUM_COMPUTE_BW = flops
 
     # ------------ 2. Generate input tensor ------------
     input_tensor = torch.randn(B, model_config.dim)
@@ -829,6 +670,17 @@ def run_timeshare_mn_mk_gemm_reshape(
         for _ in range(model_config.n_routed_experts)
     ]
 
+    # # When debugging value mismatch, initializing weights to 1 helps
+    # for layer in linear_gate_list:
+    #     torch.nn.init.ones_(layer.weight)
+
+    # # Same for the other layer lists
+    # for layer in linear_up_list:
+    #     torch.nn.init.ones_(layer.weight)
+
+    # for layer in linear_down_list:
+    #     torch.nn.init.ones_(layer.weight)
+
     w_gate_list = [
         linear_gate.weight.T.detach().clone().contiguous()
         for linear_gate in linear_gate_list
@@ -846,7 +698,9 @@ def run_timeshare_mn_mk_gemm_reshape(
     off_chip_traffic: sympy.Expr
     on_chip_requirement: sympy.Expr
 
-    output, off_chip_traffic, on_chip_requirement, cycles, duration_s = call_timeshare_mn_mk_gemm_reshape(  # type: ignore (Cannot infer type of output properly)
+    expert_per_region = model_config.n_routed_experts // n_par_region
+
+    output, off_chip_traffic, on_chip_requirement, cycles, duration_s = call_timeshare_mn_mk_gemm_reshape_fixed_fanout(  # type: ignore (Cannot infer type of output properly)
         model_config=model_config,
         batch=B,
         gate_compute_bw=GATE_COMPUTE_BW,
@@ -860,9 +714,24 @@ def run_timeshare_mn_mk_gemm_reshape(
         expert_multihot=expert_multihot,
         expert_onehot=expert_onehot,
         expert_weights=expert_weights,
-        w_gate_list=torch.cat(w_gate_list, dim=0),
-        w_up_list=torch.cat(w_up_list, dim=0),
-        w_down_list=torch.cat(w_down_list, dim=0),
+        w_gate_list=[
+            torch.cat(
+                w_gate_list[i * expert_per_region : (i + 1) * expert_per_region], dim=0
+            )
+            for i in range(n_par_region)
+        ],
+        w_up_list=[
+            torch.cat(
+                w_up_list[i * expert_per_region : (i + 1) * expert_per_region], dim=0
+            )
+            for i in range(n_par_region)
+        ],
+        w_down_list=[
+            torch.cat(
+                w_down_list[i * expert_per_region : (i + 1) * expert_per_region], dim=0
+            )
+            for i in range(n_par_region)
+        ],
         tile_N=tile_N,
         tile_F=tile_F,
         n_par_region=n_par_region,
@@ -884,7 +753,9 @@ def run_timeshare_mn_mk_gemm_reshape(
             linear_down_list,
         )
 
-        check_gold_tensor(output.store_file_name, final_gold)
+        check_gold_tensor(
+            output.store_file_name, final_gold.detach().clone().contiguous()
+        )
 
     return (off_chip_traffic, on_chip_requirement, cycles, duration_s)
 
@@ -923,8 +794,11 @@ def test_timeshare_mn_mk_gemm_reshape():
     model_config = TinyQwen30b()
     # model_config = Qwen30b()
 
+    n_par_region_list = [4, 8, 16, 32, 64]
     tile_Ns = [16]  # For the batch dim (64)
     tile_Fs = [24]  # For the model_config.moe_inter_dim
+
+    flops = 4096
 
     # ------------ Expert Indices ------------
     iter = 32
@@ -941,7 +815,7 @@ def test_timeshare_mn_mk_gemm_reshape():
     )
     print(f"Expert counts: {expert_counts}")
 
-    n_par_region = 32
+    n_par_region = 64
 
     # ------------ Input generation -----------
     B = expert_indices.shape[0]
@@ -952,40 +826,44 @@ def test_timeshare_mn_mk_gemm_reshape():
 
     input_tensor = torch.randn(B, model_config.dim)
 
-    for tile_N in tile_Ns:
-        for tile_F in tile_Fs:
-            results = []
+    for n_par_region in n_par_region_list:
+        for tile_N in tile_Ns:
+            for tile_F in tile_Fs:
+                results = []
 
-            off_chip_traffic, on_chip_requirement, cycles, duration_s = (
-                run_timeshare_mn_mk_gemm_reshape(
-                    tile_N=tile_N,
-                    tile_F=tile_F,
-                    input_tensor=input_tensor,
-                    expert_indices=expert_indices,
-                    model_config=model_config,
-                    simulate_rust="timing",  # "timing",
-                    gold_check=False,
-                    save_graph=False,
-                    n_par_region=n_par_region,
-                    par_dispatch=par_dispatch,
-                    mock_bf16=mock_bf16,
-                    # logging=f"expert_par_gemm_n{tile_N}_f{tile_F}",
+                off_chip_traffic, on_chip_requirement, cycles, duration_s = (
+                    run_timeshare_mn_mk_gemm_reshape_fixed_fanout(
+                        tile_N=tile_N,
+                        tile_F=tile_F,
+                        input_tensor=input_tensor,
+                        expert_indices=expert_indices,
+                        model_config=model_config,
+                        simulate_rust="full",  # "timing",
+                        gold_check=True,
+                        save_graph=False,
+                        n_par_region=n_par_region,
+                        flops=flops,
+                        par_dispatch=par_dispatch,
+                        mock_bf16=mock_bf16,
+                        # logging=f"expert_par_gemm_n{tile_N}_f{tile_F}",
+                    )
                 )
-            )
 
-            # ------------ substitue symbols in the off_chip_traffic and on_chip_requirement ------------
-            free_symbols = sorted(off_chip_traffic.free_symbols, key=str)
+                # ------------ substitue symbols in the off_chip_traffic and on_chip_requirement ------------
+                free_symbols = sorted(off_chip_traffic.free_symbols, key=str)
 
-            sub_dict = {
-                symbol: value
-                for symbol, value in zip(free_symbols, expert_counts.tolist())
-            }
-            # print(f"off_chip_traffic: {off_chip_traffic}")
+                sub_dict = {
+                    symbol: value
+                    for symbol, value in zip(free_symbols, expert_counts.tolist())
+                }
+                # print(f"off_chip_traffic: {off_chip_traffic}")
 
-            off_chip_traffic_val = off_chip_traffic.subs(sub_dict)
+                off_chip_traffic_val = off_chip_traffic.subs(sub_dict)
 
-            # ------------ Print the results ------------
-            print(f"Off-chip traffic (KB): {round(off_chip_traffic_val / 1024, 2)}")
-            print(f"On-chip requirement (KB): {round(on_chip_requirement / 1024, 2)}")
-            print(f"Cycles: {cycles}")
-            print(f"Duration: {duration_s} s")
+                # ------------ Print the results ------------
+                print(f"Off-chip traffic (KB): {round(off_chip_traffic_val / 1024, 2)}")
+                print(
+                    f"On-chip requirement (KB): {round(on_chip_requirement / 1024, 2)}"
+                )
+                print(f"Cycles: {cycles}")
+                print(f"Duration: {duration_s} s")

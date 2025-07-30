@@ -62,8 +62,6 @@ def infer_broadcast(graph: nx.MultiDiGraph) -> nx.MultiDiGraph:
                     lowest_existing_edge_key[key] = 0
 
                 for idx, dst_node_list_i in enumerate(regrouped_dst_node_list):
-                    print(f"idx: {idx}, dst_node_list_i: {dst_node_list_i}")
-                for idx, dst_node_list_i in enumerate(regrouped_dst_node_list):
 
                     if len(dst_node_list_i) > 1:
                         src_node = (node, idx)  # type: ignore (Cannot infer Union[EagerMerge, FlatPartition] is a subclass of StepOps)
