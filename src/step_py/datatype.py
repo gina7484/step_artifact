@@ -70,6 +70,20 @@ class Uint64(ElementTP):
         return "Uint64"
 
 
+class Bool(ElementTP):
+    def __eq__(self, value):
+        if isinstance(value, Bool):
+            return True
+        return False
+
+    def size_in_bytes(self) -> sympy.Expr:
+        """Return the size of Bool in bytes."""
+        return sympy.Integer(1)
+
+    def __str__(self) -> str:
+        return "Bool"
+
+
 @dataclass
 class DynTile:
     tile_dtype: ElementTP

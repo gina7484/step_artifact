@@ -8,6 +8,7 @@ from step_py.functions.init_fn import InitFn
 from step_py.functions.map_accum_fn import MapAccumFn
 from step_py.functions.map_fn import MapFn
 from step_py.datatype import (
+    Bool,
     Buffer,
     DynTile,
     MultiHot,
@@ -201,6 +202,146 @@ class RandomOffChipLoad(StepOps):
     def on_chip_requirement(self, count_fifos: bool = False) -> sympy.Expr:
         """Return the on-chip memory requirement for this operation."""
         return sympy.Integer(self.tile_row * self.tile_col * self.n_byte)
+
+
+class RandomOffChipStore(StepOps):
+    underlying: torch.Tensor
+    tensor_shape_tiled: Tuple[int, ...]
+    wdata: Union[StepOps, Tuple[StepOps, int]]
+    waddr: Union[StepOps, Tuple[StepOps, int]]
+    tile_row: int
+    tile_col: int
+    n_byte: int
+    store_file_name: str
+    ack_based_on_waddr: bool  # if true, the ack stream's shape will be based on the waddr, otherwise it is based on the wdata
+    base_addr_byte: int
+    buffer_depth: int
+    par_dispatch: int
+    _stream: Stream
+
+    def __init__(
+        self,
+        graph: MultiDiGraph,
+        underlying: torch.Tensor,
+        wdata: Union[StepOps, Tuple[StepOps, int]],
+        waddr: Union[StepOps, Tuple[StepOps, int]],
+        tile_row: int,
+        tile_col: int,
+        base_addr_byte: int,
+        par_dispatch: int,
+        ack_based_on_waddr: bool = True,
+        buffer_depth: int = 1,
+        mock_bf16: bool = False,
+    ):
+        super().__init__()
+
+        self.underlying = underlying
+        self.tensor_shape_tiled = tuple(
+            list(underlying.shape[:-2])
+            + [
+                underlying.shape[-2] // tile_row,
+                underlying.shape[-1] // tile_col,
+            ]
+        )
+        self.wdata = wdata
+        self.waddr = waddr
+        self.tile_row = tile_row
+        self.tile_col = tile_col
+        self.base_addr_byte = base_addr_byte
+        self.par_dispatch = par_dispatch
+        self.buffer_depth = buffer_depth
+        self.ack_based_on_waddr = ack_based_on_waddr
+        self.store_file_name = f"{str(self)}.npy"
+
+        if underlying.dtype == torch.float32:
+            if mock_bf16:
+                self.n_byte = 2  # we will use this to mimic bfloat16
+            else:
+                self.n_byte = 4
+
+            self._stream = Stream(
+                stream_dtype=Bool(),
+                shape=(
+                    get_stream(waddr).shape
+                    if ack_based_on_waddr
+                    else get_stream(wdata).shape
+                ),
+            )
+        elif underlying.dtype == torch.float16:
+            self.n_byte = 2
+
+            self._stream = Stream(
+                stream_dtype=Bool(),
+                shape=(
+                    get_stream(waddr).shape
+                    if ack_based_on_waddr
+                    else get_stream(wdata).shape
+                ),
+            )
+        else:
+            raise ValueError(f"Unsupported dtype: {underlying.dtype}")
+
+        waddr_node = waddr if isinstance(waddr, StepOps) else waddr[0]
+        wdata_node = wdata if isinstance(wdata, StepOps) else wdata[0]
+        graph.add_edge(waddr_node, self)
+        graph.add_edge(wdata_node, self)
+
+    @property
+    def stream(self) -> Stream:
+        """The stream of the operation."""
+        return self._stream
+
+    @property
+    def stream_list(self) -> List[Stream]:
+        return [self._stream]
+
+    @property
+    def input(self) -> Union["StepOps", Tuple["StepOps", int]]:
+        return NotImplementedError(
+            "Shouldn't be called for nodes that has multiple inputs"
+        )
+
+    @property
+    def input_list(self) -> List[Union["StepOps", Tuple["StepOps", int]]]:
+        return [self.waddr, self.wdata]
+
+    def stream_idx(self, idx: int) -> Stream:
+        raise NotImplementedError(
+            "Shouldn't be called for nodes that only have a single output stream"
+        )
+
+    def __str__(self):
+        cls = self.__class__.__name__
+        return f"{cls}_{self.instance_id}"
+
+    def replace_input(
+        self,
+        org_input: Union[StepOps, Tuple[StepOps, int]],
+        new_input: Union[StepOps, Tuple[StepOps, int]],
+    ):
+        if self.waddr == org_input:
+            if get_stream(self.waddr) != get_stream(new_input):
+                raise ValueError("The shape of the input stream shouldn't change")
+            self.waddr = new_input
+        elif self.wdata == org_input:
+            if get_stream(self.wdata) != get_stream(new_input):
+                raise ValueError("The shape of the input stream shouldn't change")
+            self.wdata = new_input
+        else:
+            raise ValueError("Wrong org_input")
+
+    def off_chip_traffic(self) -> sympy.Expr:
+        """Return the off-chip traffic for this operation."""
+        total_elements = self._stream.total_elements() * sympy.Integer(
+            self.tile_row * self.tile_col * self.n_byte
+        )
+        return total_elements
+
+    def on_chip_requirement(self, count_fifos: bool = False) -> sympy.Expr:
+        """Return the on-chip memory requirement for this operation."""
+        return sympy.Integer(
+            self.tile_row * self.tile_col * self.n_byte * self.buffer_depth
+        )
 
 
 class OffChipLoad(StepOps):
@@ -434,6 +575,98 @@ class DynOffChipLoad(StepOps):
     def on_chip_requirement(self, count_fifos: bool = False) -> sympy.Expr:
         """Return the on-chip memory requirement for this operation."""
         return sympy.Integer(self.tile_row * self.tile_col * self.n_byte)
+
+
+class ExpandRef(StepOps):
+    _input: Union[StepOps, Tuple[StepOps, int]]
+    ref: Union[StepOps, Tuple[StepOps, int]]
+    expand_rank: int  # number of the inner dimensions with size 1 that will be expanded
+    _stream: Stream
+
+    def __init__(
+        self,
+        graph: MultiDiGraph,
+        input: Union[StepOps, Tuple[StepOps, int]],
+        ref: Union[StepOps, Tuple[StepOps, int]],
+        expand_rank: int,
+    ):
+        super().__init__()
+
+        in_stream_shape = get_stream(input).shape
+        ref_stream_shape = get_stream(ref).shape
+
+        assert expand_rank > 0
+        assert in_stream_shape[-expand_rank:] == (1,) * expand_rank
+        assert in_stream_shape[:-expand_rank] == ref_stream_shape[:-expand_rank]
+
+        self._input = input
+        self.ref = ref
+        self._stream = Stream(
+            stream_dtype=get_stream(input).stream_dtype, shape=get_stream(ref).shape
+        )
+
+        input_node = input if isinstance(input, StepOps) else input[0]
+        ref_node = ref if isinstance(ref, StepOps) else ref[0]
+        graph.add_edge(input_node, self)
+        graph.add_edge(ref_node, self)
+
+    @property
+    def stream(self) -> Stream:
+        """The stream of the operation."""
+        return self._stream
+
+    @property
+    def stream_list(self) -> List[Stream]:
+        return [self._stream]
+
+    @property
+    def input(self) -> Union["StepOps", Tuple["StepOps", int]]:
+        raise NotImplementedError(
+            "Shouldn't be called for nodes that has multiple inputs"
+        )
+
+    @property
+    def input_list(self) -> List[Union["StepOps", Tuple["StepOps", int]]]:
+        return [self._input, self.ref]
+
+    def stream_idx(self, idx: int) -> Stream:
+        raise NotImplementedError(
+            "Shouldn't be called for nodes that only have a single output stream"
+        )
+
+    def __str__(self):
+        cls = self.__class__.__name__
+        return f"{cls}_{self.instance_id}"
+
+    def replace_input(
+        self,
+        org_input: Union["StepOps", Tuple["StepOps", int]],
+        new_input: Union["StepOps", Tuple["StepOps", int]],
+    ):
+        if self.input == org_input:
+            if get_stream(self.input) != get_stream(new_input):
+                raise ValueError("The shape of the input stream shouldn't change")
+            self._input = new_input
+        elif self.ref == org_input:
+            if get_stream(self.ref) != get_stream(new_input):
+                raise ValueError("The shape of the ref stream shouldn't change")
+            self.ref = new_input
+        else:
+            raise ValueError("Wrong org_input")
+
+    def off_chip_traffic(self) -> sympy.Expr:
+        """Return the off-chip traffic for this operation."""
+        return sympy.Integer(0)
+
+    def on_chip_requirement(self, count_fifos: bool = False) -> sympy.Expr:
+        """Return the on-chip memory requirement for this operation."""
+        # Get the size of the stream's data type
+        stream_size: sympy.Expr = self._stream.stream_dtype.size_in_bytes()
+
+        if count_fifos:
+            return sympy.Mul(stream_size, sympy.Integer(2))
+        else:
+            return stream_size
 
 
 class RepeatStatic(StepOps):

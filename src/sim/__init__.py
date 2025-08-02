@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 from step_py.ops import *
 from step_py.utility_ops import *
 from step_py.functions import accum_fn, map_fn, init_fn, map_accum_fn
@@ -24,6 +24,7 @@ class SimConfig:
     channel_depth: Optional[int]
     functional_sim: bool = True
     mock_bf16: bool = False
+    config_dict: Optional[Dict[int, int]] = None
 
 
 def simulate(
@@ -141,7 +142,9 @@ def to_pb_init_func(op_fn: init_fn.InitFn) -> func_pb2.InitFunc:
     return func_pb
 
 
-def to_pb_datatype(dtype: Union[Tile, Buffer, Select, Uint64]) -> datatype_pb2.DataType:
+def to_pb_datatype(
+    dtype: Union[Tile, Buffer, Select, ElementTP]
+) -> datatype_pb2.DataType:
     if isinstance(dtype, (Tile, DynTile)):
         if isinstance(dtype.tile_dtype, Float32):
             dtype_pb = datatype_pb2.DataType()
@@ -182,6 +185,10 @@ def to_pb_datatype(dtype: Union[Tile, Buffer, Select, Uint64]) -> datatype_pb2.D
     elif isinstance(dtype, Uint64):
         dtype_pb = datatype_pb2.DataType()
         dtype_pb.scalar_u64.CopyFrom(datatype_pb2.ScalarU64())
+        return dtype_pb
+    elif isinstance(dtype, Bool):
+        dtype_pb = datatype_pb2.DataType()
+        dtype_pb.scalar_bool.CopyFrom(datatype_pb2.ScalarBool())
         return dtype_pb
     raise ValueError(f"Unsupported datatype({dtype})")
 
@@ -303,6 +310,45 @@ def serialize(graph: MultiDiGraph, protobuf_file: str, functional: bool):
                 print(f"Saved {str(op)} data to {file_path}")
 
             operator.random_off_chip_load.CopyFrom(randomoffchipload_pb)
+        elif isinstance(op, RandomOffChipStore):
+            randomoffchipstore_pb = ops_pb2.RandomOffChipStore()
+
+            if isinstance(op.waddr, Tuple):
+                waddr_node, idx = op.waddr
+                randomoffchipstore_pb.waddr_stream_idx = idx
+                randomoffchipstore_pb.waddr_id = waddr_node.instance_id
+            elif isinstance(op.waddr, StepOps):
+                randomoffchipstore_pb.waddr_id = op.waddr.instance_id
+
+            if isinstance(op.wdata, Tuple):
+                wdata_node, idx = op.wdata
+                randomoffchipstore_pb.wdata_stream_idx = idx
+                randomoffchipstore_pb.wdata_id = wdata_node.instance_id
+                randomoffchipstore_pb.wdata_dtype.CopyFrom(
+                    to_pb_datatype(wdata_node.stream_idx(idx).stream_dtype)
+                )
+            elif isinstance(op.wdata, StepOps):
+                randomoffchipstore_pb.wdata_id = op.wdata.instance_id
+                randomoffchipstore_pb.wdata_dtype.CopyFrom(
+                    to_pb_datatype(op.wdata.stream.stream_dtype)
+                )
+
+            randomoffchipstore_pb.tensor_shape_tiled.extend(list(op.tensor_shape_tiled))
+
+            if functional:
+                file_path = f"{str(op)}.npy"
+                randomoffchipstore_pb.npy_path = file_path
+                np.save(file_path, op.underlying.detach().numpy())
+                print(f"Saved {str(op)} data to {file_path}")
+
+            randomoffchipstore_pb.tile_row = op.tile_row
+            randomoffchipstore_pb.tile_col = op.tile_col
+            randomoffchipstore_pb.n_byte = op.n_byte
+            randomoffchipstore_pb.base_addr_byte = op.base_addr_byte
+            randomoffchipstore_pb.par_dispatch = op.par_dispatch
+            randomoffchipstore_pb.ack_based_on_waddr = op.ack_based_on_waddr
+
+            operator.random_off_chip_store.CopyFrom(randomoffchipstore_pb)
         elif isinstance(op, BinaryMap):
             binarymap_pb = ops_pb2.BinaryMap()
 
@@ -704,15 +750,17 @@ def serialize(graph: MultiDiGraph, protobuf_file: str, functional: bool):
             print(f"Saved {str(op)} data to {file_path}")
 
             operator.select_gen.CopyFrom(selectgen_pb)
-        elif isinstance(op, AddrGen):
-            addrgen_pb = ops_pb2.AddrGen()
+        elif isinstance(op, MetadataGen):
+            metadatagen_pb = ops_pb2.MetadataGen()
+            metadatagen_pb.dtype.CopyFrom(to_pb_datatype(op.stream.stream_dtype))
 
             file_path = f"{str(op)}.npy"
-            addrgen_pb.npy_path = file_path
+            metadatagen_pb.npy_path = file_path
             np.save(file_path, op.underlying.detach().numpy())
             print(f"Saved {str(op)} data to {file_path}")
 
-            operator.addr_gen.CopyFrom(addrgen_pb)
+            operator.metadata_gen.CopyFrom(metadatagen_pb)
+
         elif isinstance(op, ExpertAddrGen):
             expertaddrgen_pb = ops_pb2.ExpertAddrGen()
 
