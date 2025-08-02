@@ -17,8 +17,6 @@ from utils.gold_checking import check_gold_tensor
 from utils.draw_graph import save_graph_format
 from utils.moe import *
 
-from timeshare_comp_bound.test_weight_stationary_gemm import run_ws_tile_mn_mk
-
 
 def timeshare_mn_mk_gemm_reshape_fixed_fanout(
     step_graph: MultiDiGraph,
@@ -507,7 +505,7 @@ def call_timeshare_mn_mk_gemm_reshape_fixed_fanout(
     par_dispatch: int,
     logging: Optional[str] = None,
     mock_bf16: bool = False,
-) -> tuple[StepOps, sympy.Expr, sympy.Expr, int, int, int]:
+) -> tuple[StepOps, sympy.Expr, sympy.Expr, int, int]:
     """
     1. Instantiate the graph
     2. Infer Broadcast
@@ -787,8 +785,8 @@ def run_timeshare_mn_mk_gemm_reshape_fixed_fanout(
 class SmallerQwen30b:  # 16x scaled down version for each dimension
     n_routed_experts = 128
     n_activated_experts = 8
-    dim = 128  # 2048 // 16
-    moe_inter_dim = 96  # 768 // 16
+    dim = 512  # 2048 // 16
+    moe_inter_dim = 48  # 768 // 16
 
 
 @dataclass
@@ -817,21 +815,21 @@ def test_timeshare_mn_mk_gemm_reshape():
     # model_config = TinyQwen30b()
     # model_config = Qwen30b()
 
-    # n_par_region_list = [64, 32, 16, 8, 4, 2]
-    n_par_region_list = [32]
-    tile_Ns = [256]  # For the batch dim (64)
+    # n_par_region_list = [4, 8, 16, 32, 64]
+    n_par_region_list = [16]
+    tile_Ns = [64]  # For the batch dim (64)
     tile_Fs = [48]  # For the model_config.moe_inter_dim
 
-    base_flops = 1024  # unit flop for 128 case (no time sharing)
-    flops_for_weighted_sum = 1024  # fixed among sweep
+    unit_flops = 1024
+    flops_for_weighted_sum = 1024
 
     # ------------ Expert Indices ------------
     batch = 512  # 256, 512, 1024
-    layer = 30  # 0 (even), 24 (middle), 30 (uneven)
+    layer = 24  # 0 (even), 24 (middle), 30 (uneven)
     expert_selection_file = f"/home/ginasohn/expert_routing/processed_qwen/expr_large_b/token1_layer{layer}_b{batch}.npz"
     expert_indices_npz = np.load(expert_selection_file)
     expert_indices = torch.from_numpy(
-        expert_indices_npz["arr_0"]
+        expert_indices_npz["data"]
     )  # [B, n_activated_experts]
 
     # expert_counts: [n_routed_experts] (bincount across all batches)
@@ -851,7 +849,6 @@ def test_timeshare_mn_mk_gemm_reshape():
 
     results = []
     for n_par_region in n_par_region_list:
-        unit_flops = base_flops * (model_config.n_routed_experts // n_par_region)
         for tile_N in tile_Ns:
             for tile_F in tile_Fs:
 
@@ -875,7 +872,7 @@ def test_timeshare_mn_mk_gemm_reshape():
                     flops_for_weighted_sum=flops_for_weighted_sum,
                     par_dispatch=par_dispatch,
                     mock_bf16=mock_bf16,
-                    logging=f"smallqwen_expert_par_gemm_comp_bound_n{tile_N}_f{tile_F}",
+                    # logging=f"expert_par_gemm_n{tile_N}_f{tile_F}",
                 )
 
                 # ------------ Total FLOPs ------------------
@@ -923,10 +920,9 @@ def test_timeshare_mn_mk_gemm_reshape():
                     "n_par_region": n_par_region,
                     "n_expert_per_region": model_config.n_routed_experts
                     // n_par_region,
-                    "unit_flops": unit_flops,
                     "tile_N": tile_N,
                     "tile_F": tile_F,
-                    "flops": alg_flops,  # FLOP of the algorithm itself
+                    "flops": alg_flops,
                     "cycles": cycles,
                     "duration_s": duration_s,
                     "off_chip_traffic_bytes": off_chip_traffic_val,
@@ -939,14 +935,13 @@ def test_timeshare_mn_mk_gemm_reshape():
                 print(dict_to_append)
                 results.append(dict_to_append)
 
-    # out_file = f"timeshare_comp_bound/qwen_{model_config.dim}_{model_config.moe_inter_dim}_b{batch}_layer_{layer:03d}_n{tile_N}_f{tile_F}_timeshare_compbound.csv"
+    # out_file = f"qwen_{model_config.dim}_{model_config.moe_inter_dim}_iter{iter:03d}_layer_{layer:03d}_n{tile_N}_f{tile_F}_timeshare.csv"
     # try:
     #     with open(out_file, "w", newline="", encoding="utf-8") as csvfile:
     #         fieldnames = [
     #             "batch",
     #             "n_par_region",
     #             "n_expert_per_region",
-    #             "unit_flops",
     #             "tile_N",
     #             "tile_F",
     #             "flops",
@@ -968,178 +963,3 @@ def test_timeshare_mn_mk_gemm_reshape():
     #     print(f"Results written to {out_file}")
     # except Exception as e:
     #     print(f"Error writing CSV file: {e}")
-
-
-def test_baseline_for_compbound_timeshare():
-    mock_bf16 = True
-    par_dispatch = 1
-    # ------------ Model Configuration ------------
-    # model_config = SmallerQwen30b()
-    # model_config = TinyQwen30b()
-    model_config = Qwen30b()
-
-    tile_Ns = [256]  # For the batch dim (64)
-    tile_Fs = [48]  # For the model_config.moe_inter_dim
-
-    base_flops = 1024  # unit flop for 128 case (no time sharing)
-    flops_for_weighted_sum = 1024  # fixed among sweep
-
-    # ------------ Expert Indices ------------
-    batch = 512  # 256, 512, 1024
-    layer = 0  # 0 (even), 24 (middle), 30 (uneven)
-    expert_selection_file = f"/home/ginasohn/expert_routing/processed_qwen/expr_large_b/token1_layer{layer}_b{batch}.npz"
-    expert_indices_npz = np.load(expert_selection_file)
-    expert_indices = torch.from_numpy(
-        expert_indices_npz["arr_0"]
-    )  # [B, n_activated_experts]
-
-    # expert_counts: [n_routed_experts] (bincount across all batches)
-    expert_counts = torch.bincount(
-        expert_indices.flatten(), minlength=model_config.n_routed_experts
-    )
-    print(f"Expert counts: {expert_counts}")
-
-    # ------------ Input generation -----------
-    B = expert_indices.shape[0]
-
-    # Set the random seed
-    seed = 5
-    torch.manual_seed(seed)
-
-    input_tensor = torch.randn(B, model_config.dim)
-
-    unit_flops = base_flops
-    results = []
-    for tile_N in tile_Ns:
-        for tile_F in tile_Fs:
-
-            (
-                off_chip_traffic,
-                on_chip_requirement,
-                cycles,
-                duration_s,
-                allocated_comp_flops,
-            ) = run_ws_tile_mn_mk(
-                tile_N=tile_N,
-                tile_F=tile_F,
-                input_tensor=input_tensor,
-                expert_indices=expert_indices,
-                model_config=model_config,
-                simulate_rust="timing",
-                gold_check=False,
-                save_graph=False,
-                flops=unit_flops,
-                flops_for_weighted_sum=flops_for_weighted_sum,
-                par_dispatch=par_dispatch,
-                mock_bf16=mock_bf16,
-                # logging=f"expert_par_gemm_n{tile_N}_f{tile_F}",
-            )
-
-            # ------------ substitue symbols in the off_chip_traffic and on_chip_requirement ------------
-            num_tiles = [
-                (routed_toks + tile_N - 1) // tile_N
-                for routed_toks in expert_counts.tolist()
-            ]
-            after_pad_batch_dim = [num_tiles_i * tile_N for num_tiles_i in num_tiles]
-
-            alg_flops = sum(
-                [
-                    (
-                        2 * b * model_config.dim * model_config.moe_inter_dim * 3
-                    )  # 3 (Linear layers)
-                    + b * model_config.moe_inter_dim  # 1 (Element-wise mult)
-                    + (
-                        8 * b * model_config.dim * model_config.moe_inter_dim
-                    )  # silu_flops: 1(neg)+4(exp)+1(add)+1(div)+1(mul)= 8 FLOPs per element
-                    for b in after_pad_batch_dim
-                ]
-            )
-
-            # ------------ substitue symbols in the off_chip_traffic and on_chip_requirement ------------
-            free_symbols = sorted(off_chip_traffic.free_symbols, key=str)
-
-            sub_dict = {
-                symbol: value
-                for symbol, value in zip(free_symbols, expert_counts.tolist())
-            }
-
-            off_chip_traffic_val = off_chip_traffic.subs(sub_dict)
-
-            # ------------ Print the results ------------
-            dict_to_append = {
-                "batch": B,
-                "n_par_region": 128,
-                "n_expert_per_region": 1,
-                "unit_flops": unit_flops,
-                "tile_N": tile_N,
-                "tile_F": tile_F,
-                "flops": alg_flops,
-                "cycles": cycles,
-                "duration_s": duration_s,
-                "off_chip_traffic_bytes": off_chip_traffic_val,
-                "on_chip_requirement_bytes": on_chip_requirement,
-                "allocated_flops": allocated_comp_flops,
-                "utilization(%)": round(
-                    (alg_flops / cycles) / allocated_comp_flops * 100, 2
-                ),
-            }
-            print(dict_to_append)
-            results.append(dict_to_append)
-
-    out_file = f"timeshare_comp_bound/qwen_{model_config.dim}_{model_config.moe_inter_dim}_b{batch}_layer_{layer:03d}_n{tile_N}_f{tile_F}_timeshare_compbound_baseline.csv"
-    try:
-        with open(out_file, "w", newline="", encoding="utf-8") as csvfile:
-            fieldnames = [
-                "batch",
-                "n_par_region",
-                "n_expert_per_region",
-                "unit_flops",
-                "tile_N",
-                "tile_F",
-                "flops",
-                "cycles",
-                "duration_s",
-                "off_chip_traffic_bytes",
-                "on_chip_requirement_bytes",
-                "allocated_flops",
-                "utilization(%)",
-            ]
-            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-
-            writer.writeheader()
-
-            # Write data rows
-            for result in results:
-                writer.writerow(result)
-
-        print(f"Results written to {out_file}")
-    except Exception as e:
-        print(f"Error writing CSV file: {e}")
-
-
-def test_view_dist_large():
-    batch = 1024  # 256, 512, 1024
-    layer = 24  # 0 (even), 24 (middle), 30 (uneven)
-    expert_selection_file = f"/home/ginasohn/expert_routing/processed_qwen/expr_large_b/token1_layer{layer}_b{batch}.npz"
-    expert_indices_npz = np.load(expert_selection_file)
-    expert_indices = torch.from_numpy(
-        expert_indices_npz["arr_0"]
-    )  # [B, n_activated_experts]
-
-    # expert_counts: [n_routed_experts] (bincount across all batches)
-    expert_counts = torch.bincount(expert_indices.flatten(), minlength=128)
-    print(f"Expert counts: {expert_counts}")
-
-
-def test_view_dist_small():
-    iter = 32
-    layer = 12
-    expert_selection_file = f"/home/ginasohn/expert_routing/processed_qwen/expr_per_layer/iter_{iter:03d}_layer_{layer:03d}.npz"
-    expert_indices_npz = np.load(expert_selection_file)
-    expert_indices = torch.from_numpy(
-        expert_indices_npz["data"]
-    )  # [B, n_activated_experts]
-
-    # expert_counts: [n_routed_experts] (bincount across all batches)
-    expert_counts = torch.bincount(expert_indices.flatten(), minlength=128)
-    print(f"Expert counts: {expert_counts}")
