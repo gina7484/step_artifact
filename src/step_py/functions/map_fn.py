@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
 from typing import Tuple, Union
-from step_py.datatype import DynTile, Tile, MultiHot, Index
+from step_py.datatype import DynTile, Tile, MultiHot, Index, Uint64
 
 
 class MapFn(ABC):
@@ -228,3 +228,128 @@ class Silu(MapFn):
             return DynTile(tile_dtype=in_tile.tile_dtype, shape=in_tile.shape)
         else:
             raise TypeError("Input to SiLU must be of type Tile.")
+
+
+class RowWiseSum(MapFn):
+    """
+    A function that performs reduction (add) between columns within a tile.
+    This is used to do a row-wise reduction.
+    It uses the initial value as the first accumulator.
+    """
+
+    def __init__(self):
+        super().__init__()
+
+    def apply(self, input_tp: Tuple) -> Union[Tile, DynTile]:
+        if len(input_tp) != 1:
+            raise ValueError("RowWiseReduction requires exactly one input type.")
+
+        in_tile = input_tp[0]
+
+        if isinstance(in_tile, Tile):
+            return Tile(tile_dtype=in_tile.tile_dtype, shape=(in_tile.shape[0], 1))
+        elif isinstance(in_tile, DynTile):
+            return DynTile(tile_dtype=in_tile.tile_dtype, shape=(in_tile.shape[0], 1))
+        else:
+            raise TypeError("Input to RowWiseReduction must be of type Tile | DynTile.")
+
+
+class Exp(MapFn):
+    """
+    A function that applies the exponential function.
+    """
+
+    def __init__(self):
+        super().__init__()
+
+    def apply(self, input_tp: Tuple) -> Union[Tile, DynTile]:
+        if len(input_tp) != 1:
+            raise ValueError("Exp requires exactly one input type.")
+
+        in_tile = input_tp[0]
+
+        if isinstance(in_tile, Tile):
+            return Tile(tile_dtype=in_tile.tile_dtype, shape=in_tile.shape)
+        elif isinstance(in_tile, DynTile):
+            return DynTile(tile_dtype=in_tile.tile_dtype, shape=in_tile.shape)
+        else:
+            raise TypeError("Input to Exp must be of type Tile.")
+
+
+class SetOffset(MapFn):
+    """
+    A function that sets the offset of a specific tile.
+    """
+
+    def __init__(self):
+        super().__init__()
+
+    def apply(self, input_tp: Tuple) -> Union[Tile, DynTile]:
+        if len(input_tp) != 2:
+            raise ValueError("SetOffset requires exactly two input types.")
+
+        in_tile, offset = input_tp[0], input_tp[1]
+
+        if isinstance(in_tile, Tile):
+            return Tile(tile_dtype=in_tile.tile_dtype, shape=in_tile.shape)
+        elif isinstance(in_tile, DynTile):
+            return DynTile(tile_dtype=in_tile.tile_dtype, shape=in_tile.shape)
+        else:
+            raise TypeError("Input to SetOffset must be of type Tile | DynTile.")
+
+
+class RowWiseAppend(MapFn):
+    """
+    A function that appends a row to a tile.
+    This does not change the shape of the tile, but increments the offset by 1 and
+    writes the row in the new position.
+    """
+
+    def __init__(self):
+        super().__init__()
+
+    def apply(self, input_tp: Tuple) -> Union[Tile, DynTile]:
+        if len(input_tp) != 2:
+            raise ValueError("RowWiseAppend requires exactly two input types.")
+
+        in_tile, new_row = input_tp[0], input_tp[1]
+
+        if isinstance(in_tile, Tile):
+            return Tile(tile_dtype=in_tile.tile_dtype, shape=in_tile.shape)
+        elif isinstance(in_tile, DynTile):
+            return DynTile(tile_dtype=in_tile.tile_dtype, shape=in_tile.shape)
+        else:
+            raise TypeError("Input to SetOffset must be of type Tile | DynTile.")
+
+
+class CacheWriteAddrGen(MapFn):
+    """
+    A function that generates the address for the cache write.
+    Can be decomposed into a Map doing a MAC operation
+
+    """
+
+    row_offset: int
+
+    def __init__(self, row_offset: int):
+        super().__init__()
+        self.row_offset = row_offset
+
+    def apply(self, input_tp: Tuple) -> Tile:
+        if len(input_tp) != 2:
+            raise ValueError("CacheWriteAddrGen requires exactly two input types.")
+
+        in_tile, seq_len = input_tp[0], input_tp[1]
+
+        assert (
+            isinstance(in_tile, Tile)
+            and in_tile.shape == (1, 1)
+            and in_tile.tile_dtype == Uint64()
+        )
+        assert (
+            isinstance(seq_len, Tile)
+            and seq_len.shape == (1, 1)
+            and seq_len.tile_dtype == Uint64()
+        )
+
+        return Tile(tile_dtype=Uint64(), shape=(1, 1))
