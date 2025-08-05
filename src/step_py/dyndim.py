@@ -97,3 +97,8 @@ class DynDim:
 
     def __repr__(self) -> str:
         return str(self.expr)
+
+    def __eq__(self, other):
+        if not isinstance(other, DynDim):
+            return NotImplemented
+        return self.expr.equals(other.expr)

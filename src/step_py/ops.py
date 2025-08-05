@@ -90,6 +90,54 @@ class StepOps(ABC):
         pass
 
 
+class MockStreamOp(StepOps):
+    _stream: Stream
+
+    def __init__(self, stream: Stream):
+        super().__init__()
+        self._stream = stream
+
+    @property
+    def stream(self) -> Stream:
+        return self._stream
+
+    @property
+    def stream_list(self) -> List[Stream]:
+        return [self._stream]
+
+    @property
+    def input(self) -> Union["StepOps", Tuple["StepOps", int]]:
+        raise NotImplementedError("MockStreamOp doesn't have input")
+
+    @property
+    def input_list(self) -> List[Union["StepOps", Tuple["StepOps", int]]]:
+        raise NotImplementedError("MockStreamOp doesn't have input")
+
+    def stream_idx(self, idx: int) -> Stream:
+        raise NotImplementedError(
+            "Shouldn't be called for nodes that only have a single output stream"
+        )
+
+    def replace_input(
+        self,
+        org_input: Union["StepOps", Tuple["StepOps", int]],
+        new_input: Union["StepOps", Tuple["StepOps", int]],
+    ):
+        raise NotImplementedError("MockStreamOp doesn't have input")
+
+    def on_chip_requirement(self, count_fifos: bool = False) -> sympy.Expr:
+        """Return the on-chip memory requirement for this operation."""
+        raise NotImplementedError(
+            "MockStreamOp shouldn't remain in the graph when calling this method."
+        )
+
+    def off_chip_traffic(self) -> sympy.Expr:
+        """Return the off-chip traffic (bytes) for this operation."""
+        raise NotImplementedError(
+            "MockStreamOp shouldn't remain in the graph when calling this method."
+        )
+
+
 class RandomOffChipLoad(StepOps):
     underlying: torch.Tensor
     tensor_shape_tiled: Tuple[int, ...]
@@ -604,6 +652,7 @@ class ExpandRef(StepOps):
         self._stream = Stream(
             stream_dtype=get_stream(input).stream_dtype, shape=get_stream(ref).shape
         )
+        self.expand_rank = expand_rank
 
         input_node = input if isinstance(input, StepOps) else input[0]
         ref_node = ref if isinstance(ref, StepOps) else ref[0]
@@ -643,8 +692,8 @@ class ExpandRef(StepOps):
         org_input: Union["StepOps", Tuple["StepOps", int]],
         new_input: Union["StepOps", Tuple["StepOps", int]],
     ):
-        if self.input == org_input:
-            if get_stream(self.input) != get_stream(new_input):
+        if self._input == org_input:
+            if get_stream(self._input) != get_stream(new_input):
                 raise ValueError("The shape of the input stream shouldn't change")
             self._input = new_input
         elif self.ref == org_input:
@@ -1922,6 +1971,29 @@ class EagerMerge(StepOps):
         cls = self.__class__.__name__
         return f"{cls}_{self.instance_id} ({self.input_rank} D)"
 
+    def replace_full_input(
+        self,
+        graph: MultiDiGraph,
+        new_input_list: List[Union["StepOps", Tuple["StepOps", int]]],
+    ):
+        assert len(self._inputs) == len(
+            new_input_list
+        ), "The number of inputs should be the same"
+
+        for org_node, new_node in zip(self._inputs, new_input_list):
+            if get_stream(org_node).shape != get_stream(new_node).shape:
+                raise ValueError("The shape of the input stream shouldn't change")
+
+        for input_node in self._inputs:
+            node = input_node if isinstance(input_node, StepOps) else input_node[0]
+            graph.remove_node(node)
+
+        self._inputs = new_input_list
+
+        for input_node in new_input_list:
+            node = input_node if isinstance(input_node, StepOps) else input_node[0]
+            graph.add_edge(node, self)
+
     def replace_input(
         self,
         org_input: Union["StepOps", Tuple["StepOps", int]],
@@ -2423,7 +2495,10 @@ class Reshape(StepOps):
         self.input_stream_rank = in_stream.rank
 
         rank_pos = in_stream.rank - reshape_rank
-        assert (reshape_rank > 0 and in_stream.shape[rank_pos] % chunk_size == 0) or (
+        assert (
+            isinstance(in_stream.shape[rank_pos], int)
+            and in_stream.shape[rank_pos] % chunk_size == 0
+        ) or (
             reshape_rank == 0 and (pad_fn is not None or chunk_size == 1)
         ), "The chunk size must be a divisor of the shape at the reshape rank if the rank being split is not the innermost"
 

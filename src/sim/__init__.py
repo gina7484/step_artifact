@@ -75,6 +75,9 @@ def to_pb_elem_to_elem_func(
     elif isinstance(op_fn, map_fn.Add):
         map_fn_pb = func_pb2.Add()
         func_pb.add.CopyFrom(map_fn_pb)
+    elif isinstance(op_fn, map_fn.Div):
+        map_fn_pb = func_pb2.Div()
+        func_pb.div.CopyFrom(map_fn_pb)
     elif isinstance(op_fn, map_fn.RowWiseSum):
         map_fn_pb = func_pb2.RowWiseSum()
         func_pb.row_wise_sum.CopyFrom(map_fn_pb)
@@ -131,9 +134,9 @@ def to_pb_accum_func(
     elif isinstance(op_fn, accum_fn.RetileRow):
         accum_fn_pb = func_pb2.RetileRow()
         func_pb.retile_row.CopyFrom(accum_fn_pb)
-    elif isinstance(op_fn, accum_fn.RetileCol):
-        accum_fn_pb = func_pb2.RetileCol()
-        func_pb.retile_col.CopyFrom(accum_fn_pb)
+    elif isinstance(op_fn, accum_fn.SignalReqAllRead):
+        accum_fn_pb = func_pb2.SignalReqAllRead()
+        func_pb.signal_req_all_read.CopyFrom(accum_fn_pb)
 
     else:
         raise NotImplementedError(
@@ -749,7 +752,6 @@ def serialize(graph: MultiDiGraph, protobuf_file: str, functional: bool):
         elif isinstance(op, Flatten):
             flatten_pb = ops_pb2.Flatten()
 
-            flatten_pb.input_id = op.input.instance_id
             if isinstance(op.input, Tuple):
                 input_node, idx = op.input
                 flatten_pb.stream_idx = idx
@@ -814,7 +816,17 @@ def serialize(graph: MultiDiGraph, protobuf_file: str, functional: bool):
             operator.select_gen.CopyFrom(selectgen_pb)
         elif isinstance(op, MetadataGen):
             metadatagen_pb = ops_pb2.MetadataGen()
-            metadatagen_pb.dtype.CopyFrom(to_pb_datatype(op.stream.stream_dtype))
+
+            if op.underlying.dtype == torch.int64:
+                dtype_pb = datatype_pb2.DataType()
+                dtype_pb.scalar_i64.CopyFrom(datatype_pb2.ScalarI64())
+            elif op.underlying.dtype == torch.uint64:
+                dtype_pb = datatype_pb2.DataType()
+                dtype_pb.scalar_u64.CopyFrom(datatype_pb2.ScalarU64())
+            else:
+                raise ValueError(f"Unsupported dtype: {op.underlying.dtype}")
+
+            metadatagen_pb.dtype.CopyFrom(dtype_pb)
 
             file_path = f"{str(op)}.npy"
             metadatagen_pb.npy_path = file_path
@@ -827,10 +839,10 @@ def serialize(graph: MultiDiGraph, protobuf_file: str, functional: bool):
 
             if isinstance(op.idx, Tuple):
                 input_node, idx = op.idx
-                cachereadaddrgen_pb.input_stream_idx = idx
-                cachereadaddrgen_pb.input_id = input_node.instance_id
+                cachereadaddrgen_pb.idx_stream_idx = idx
+                cachereadaddrgen_pb.idx_id = input_node.instance_id
             else:
-                cachereadaddrgen_pb.input_id = op.idx.instance_id
+                cachereadaddrgen_pb.idx_id = op.idx.instance_id
 
             if isinstance(op.seq_len, Tuple):
                 seq_len_node, idx = op.seq_len
@@ -924,6 +936,7 @@ def serialize(graph: MultiDiGraph, protobuf_file: str, functional: bool):
                 )
 
             operator.consumer_context.CopyFrom(consumercontext_pb)
+
         else:
             raise ValueError(f"Unsupported operation type: {type(op)}")
 

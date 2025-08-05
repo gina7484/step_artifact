@@ -136,7 +136,10 @@ class FilterLastTile(StepOps):
     def __init__(self, graph: MultiDiGraph, input: Union[StepOps, Tuple[StepOps, int]]):
         super().__init__()
         self._input = input
-        self._stream = Stream(stream_dtype=MultiHot(2), shape=get_stream(input).shape)
+        self._stream = Stream(
+            stream_dtype=MultiHot(2),
+            shape=get_stream(input).shape + (DynDim(f"{str(self)}"),),
+        )
 
         input_node = input if isinstance(input, StepOps) else input[0]
         graph.add_edge(input_node, self)

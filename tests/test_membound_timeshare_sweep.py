@@ -1,3 +1,4 @@
+from re import T
 import torch
 from networkx import MultiDiGraph
 import csv
@@ -40,10 +41,12 @@ def timeshare_mn_mk_gemm_reshape_fixed_fanout(
     n_par_region: int,
     mock_bf16: bool,
     par_dispatch: int,
-) -> OffChipStore:
+) -> Tuple[OffChipStore, int]:
     """
     Constructs the STeP graph
     """
+    allocated_comp_flops = 0
+
     assert model_config.n_routed_experts % n_par_region == 0
     expert_per_region = model_config.n_routed_experts // n_par_region
 
@@ -236,6 +239,7 @@ def timeshare_mn_mk_gemm_reshape_fixed_fanout(
         )
         for feature, weight in zip(repeated_feature_streams, ready_up_loads)
     ]
+    allocated_comp_flops += up_compute_bw * len(up_feature_streams)
 
     # ------------ Stage 8: Load gate parameters ------------
     # - tensor shape: [D, F]
@@ -282,6 +286,7 @@ def timeshare_mn_mk_gemm_reshape_fixed_fanout(
         )
         for feature, weight in zip(repeated_feature_streams, ready_gate_loads)
     ]
+    allocated_comp_flops += gate_compute_bw * len(pre_act_gate_feature_streams)
 
     # ------------ Stage 9: Compute the activation ------------
     # - input stream shape:   [Σ((Dyn + tile_N -1) // tile_N), F // tile_F] (tile: [tile_N, tile_F])
@@ -296,6 +301,7 @@ def timeshare_mn_mk_gemm_reshape_fixed_fanout(
         )
         for feature in pre_act_gate_feature_streams
     ]
+    allocated_comp_flops += act_fn_compute_bw * len(gate_feature_streams)
 
     # ------------ Stage 10: Compute the projected features ------------
     # - input1 stream shape:   [Σ((Dyn + tile_N -1) // tile_N), F // tile_F] (tile: [tile_N, tile_F])
@@ -307,6 +313,7 @@ def timeshare_mn_mk_gemm_reshape_fixed_fanout(
         )
         for up_feature, gate_feature in zip(up_feature_streams, gate_feature_streams)
     ]
+    allocated_comp_flops += mult_compute_bw * len(projected_feature_streams)
 
     # ------------ Stage 11: Load down parameters ------------
     # - tensor shape: [F, D]
@@ -355,6 +362,7 @@ def timeshare_mn_mk_gemm_reshape_fixed_fanout(
         )
         for feature, weight in zip(projected_feature_streams, ready_down_loads)
     ]
+    allocated_comp_flops += down_compute_bw * len(chunked_down_feature_streams)
 
     # ------------ Additional Stage for Redistributing the experts -----------
     # - output stream shape:  [Σ((Dyn + tile_N -1) // tile_N)] x n_par_region (tile: [tile_N, D])
@@ -424,6 +432,7 @@ def timeshare_mn_mk_gemm_reshape_fixed_fanout(
         )
         for i in range(model_config.n_routed_experts)
     ]
+    allocated_comp_flops += weight_scale_compute_bw * len(weighted_feature_streams)
 
     # ------------ Stage 15: Reassemble the weighted features ------------
     # Reassemble
@@ -452,6 +461,8 @@ def timeshare_mn_mk_gemm_reshape_fixed_fanout(
         accum_compute_bw,
     )  # [1, N] (tile: [1, D])
 
+    allocated_comp_flops += accum_compute_bw
+
     # ------------ Stage 17: Store the output ------------
     output = OffChipStore(
         step_graph,
@@ -466,7 +477,7 @@ def timeshare_mn_mk_gemm_reshape_fixed_fanout(
         store_file_name="output",
     )  # [1, N, 1] (tile: [1, D])
 
-    return output
+    return output, allocated_comp_flops
 
 
 def call_timeshare_mn_mk_gemm_reshape_fixed_fanout(
@@ -506,7 +517,9 @@ def call_timeshare_mn_mk_gemm_reshape_fixed_fanout(
     # ------------ 1. Construct the graph ------------
     step_graph = MultiDiGraph()
 
-    output: OffChipStore = timeshare_mn_mk_gemm_reshape_fixed_fanout(
+    output: OffChipStore
+    allocated_comp_flops: int
+    output, allocated_comp_flops = timeshare_mn_mk_gemm_reshape_fixed_fanout(
         step_graph=step_graph,
         model_config=model_config,
         batch=batch,
@@ -573,7 +586,7 @@ def call_timeshare_mn_mk_gemm_reshape_fixed_fanout(
     if simulate_rust in ["full", "timing"]:
         hbm_config = HBMConfig(64, 32, 2, 2, 1, 14)
         sim_config = SimConfig(
-            channel_depth=1, functional_sim=simulate_rust == "full", mock_bf16=mock_bf16
+            channel_depth=2, functional_sim=simulate_rust == "full", mock_bf16=mock_bf16
         )
 
         if logging is None:
@@ -601,6 +614,7 @@ def call_timeshare_mn_mk_gemm_reshape_fixed_fanout(
         total_on_chip_requirement,
         cycles,
         duration_s,
+        allocated_comp_flops,
     )
 
 
@@ -615,6 +629,7 @@ def run_timeshare_mn_mk_gemm_reshape_fixed_fanout(
     save_graph: bool,
     n_par_region: int,
     flops: int,
+    flops_for_weighted_sum: int,
     par_dispatch: int,
     mock_bf16: bool = False,
     logging: Optional[str] = None,
@@ -636,8 +651,8 @@ def run_timeshare_mn_mk_gemm_reshape_fixed_fanout(
     ACT_FN_COMPUTE_BW = flops
     MULT_COMPUTE_BW = flops
     DOWN_COMPUTE_BW = flops
-    WEIGHT_SCALE_COMPUTE_BW = flops
-    ACCUM_COMPUTE_BW = flops
+    WEIGHT_SCALE_COMPUTE_BW = flops_for_weighted_sum
+    ACCUM_COMPUTE_BW = flops_for_weighted_sum
 
     # ------------ 2. Generate input tensor ------------
     input_tensor = torch.randn(B, model_config.dim)
@@ -700,7 +715,7 @@ def run_timeshare_mn_mk_gemm_reshape_fixed_fanout(
 
     expert_per_region = model_config.n_routed_experts // n_par_region
 
-    output, off_chip_traffic, on_chip_requirement, cycles, duration_s = call_timeshare_mn_mk_gemm_reshape_fixed_fanout(  # type: ignore (Cannot infer type of output properly)
+    output, off_chip_traffic, on_chip_requirement, cycles, duration_s, allocated_comp_flops = call_timeshare_mn_mk_gemm_reshape_fixed_fanout(  # type: ignore (Cannot infer type of output properly)
         model_config=model_config,
         batch=B,
         gate_compute_bw=GATE_COMPUTE_BW,
@@ -757,14 +772,20 @@ def run_timeshare_mn_mk_gemm_reshape_fixed_fanout(
             output.store_file_name, final_gold.detach().clone().contiguous()
         )
 
-    return (off_chip_traffic, on_chip_requirement, cycles, duration_s)
+    return (
+        off_chip_traffic,
+        on_chip_requirement,
+        cycles,
+        duration_s,
+        allocated_comp_flops,
+    )
 
 
 @dataclass
 class SmallerQwen30b:  # 16x scaled down version for each dimension
     n_routed_experts = 128
     n_activated_experts = 8
-    dim = 128  # 2048 // 16
+    dim = 512  # 2048 // 16
     moe_inter_dim = 48  # 768 // 16
 
 
@@ -790,15 +811,17 @@ def test_timeshare_mn_mk_gemm_reshape():
     mock_bf16 = True
     par_dispatch = 1
     # ------------ Model Configuration ------------
-    # model_config = SmallerQwen30b()
-    model_config = TinyQwen30b()
+    model_config = SmallerQwen30b()
+    # model_config = TinyQwen30b()
     # model_config = Qwen30b()
 
-    n_par_region_list = [4, 8, 16, 32, 64]
-    tile_Ns = [16]  # For the batch dim (64)
-    tile_Fs = [24]  # For the model_config.moe_inter_dim
+    # n_par_region_list = [4, 8, 16, 32, 64]
+    n_par_region_list = [16]
+    tile_Ns = [64]  # For the batch dim (64)
+    tile_Fs = [48]  # For the model_config.moe_inter_dim
 
-    flops = 4096
+    unit_flops = 1024
+    flops_for_weighted_sum = 1024
 
     # ------------ Expert Indices ------------
     iter = 32
@@ -815,8 +838,6 @@ def test_timeshare_mn_mk_gemm_reshape():
     )
     print(f"Expert counts: {expert_counts}")
 
-    n_par_region = 64
-
     # ------------ Input generation -----------
     B = expert_indices.shape[0]
 
@@ -826,27 +847,53 @@ def test_timeshare_mn_mk_gemm_reshape():
 
     input_tensor = torch.randn(B, model_config.dim)
 
+    results = []
     for n_par_region in n_par_region_list:
         for tile_N in tile_Ns:
             for tile_F in tile_Fs:
-                results = []
 
-                off_chip_traffic, on_chip_requirement, cycles, duration_s = (
-                    run_timeshare_mn_mk_gemm_reshape_fixed_fanout(
-                        tile_N=tile_N,
-                        tile_F=tile_F,
-                        input_tensor=input_tensor,
-                        expert_indices=expert_indices,
-                        model_config=model_config,
-                        simulate_rust="full",  # "timing",
-                        gold_check=True,
-                        save_graph=False,
-                        n_par_region=n_par_region,
-                        flops=flops,
-                        par_dispatch=par_dispatch,
-                        mock_bf16=mock_bf16,
-                        # logging=f"expert_par_gemm_n{tile_N}_f{tile_F}",
-                    )
+                (
+                    off_chip_traffic,
+                    on_chip_requirement,
+                    cycles,
+                    duration_s,
+                    allocated_comp_flops,
+                ) = run_timeshare_mn_mk_gemm_reshape_fixed_fanout(
+                    tile_N=tile_N,
+                    tile_F=tile_F,
+                    input_tensor=input_tensor,
+                    expert_indices=expert_indices,
+                    model_config=model_config,
+                    simulate_rust="timing",
+                    gold_check=False,
+                    save_graph=False,
+                    n_par_region=n_par_region,
+                    flops=unit_flops,
+                    flops_for_weighted_sum=flops_for_weighted_sum,
+                    par_dispatch=par_dispatch,
+                    mock_bf16=mock_bf16,
+                    # logging=f"expert_par_gemm_n{tile_N}_f{tile_F}",
+                )
+
+                # ------------ Total FLOPs ------------------
+                num_tiles = [
+                    (routed_toks + tile_N - 1) // tile_N
+                    for routed_toks in expert_counts.tolist()
+                ]
+                after_pad_batch_dim = [
+                    num_tiles_i * tile_N for num_tiles_i in num_tiles
+                ]
+                alg_flops = sum(
+                    [
+                        (
+                            2 * b * model_config.dim * model_config.moe_inter_dim * 3
+                        )  # 3 (Linear layers)
+                        + b * model_config.moe_inter_dim  # 1 (Element-wise mult)
+                        + (
+                            8 * b * model_config.dim * model_config.moe_inter_dim
+                        )  # silu_flops: 1(neg)+4(exp)+1(add)+1(div)+1(mul)= 8 FLOPs per element
+                        for b in after_pad_batch_dim
+                    ]
                 )
 
                 # ------------ substitue symbols in the off_chip_traffic and on_chip_requirement ------------
@@ -867,3 +914,52 @@ def test_timeshare_mn_mk_gemm_reshape():
                 )
                 print(f"Cycles: {cycles}")
                 print(f"Duration: {duration_s} s")
+
+                dict_to_append = {
+                    "batch": B,
+                    "n_par_region": n_par_region,
+                    "n_expert_per_region": model_config.n_routed_experts
+                    // n_par_region,
+                    "tile_N": tile_N,
+                    "tile_F": tile_F,
+                    "flops": alg_flops,
+                    "cycles": cycles,
+                    "duration_s": duration_s,
+                    "off_chip_traffic_bytes": off_chip_traffic_val,
+                    "on_chip_requirement_bytes": on_chip_requirement,
+                    "allocated_flops": allocated_comp_flops,
+                    "utilization(%)": round(
+                        (alg_flops / cycles) / allocated_comp_flops * 100, 2
+                    ),
+                }
+                print(dict_to_append)
+                results.append(dict_to_append)
+
+    # out_file = f"qwen_{model_config.dim}_{model_config.moe_inter_dim}_iter{iter:03d}_layer_{layer:03d}_n{tile_N}_f{tile_F}_timeshare.csv"
+    # try:
+    #     with open(out_file, "w", newline="", encoding="utf-8") as csvfile:
+    #         fieldnames = [
+    #             "batch",
+    #             "n_par_region",
+    #             "n_expert_per_region",
+    #             "tile_N",
+    #             "tile_F",
+    #             "flops",
+    #             "cycles",
+    #             "duration_s",
+    #             "off_chip_traffic_bytes",
+    #             "on_chip_requirement_bytes",
+    #             "allocated_flops",
+    #             "utilization(%)",
+    #         ]
+    #         writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+
+    #         writer.writeheader()
+
+    #         # Write data rows
+    #         for result in results:
+    #             writer.writerow(result)
+
+    #     print(f"Results written to {out_file}")
+    # except Exception as e:
+    #     print(f"Error writing CSV file: {e}")

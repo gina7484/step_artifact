@@ -208,6 +208,45 @@ class Add(MapFn):
         return Tile(tile_dtype=tile_a.tile_dtype, shape=output_shape)
 
 
+class Div(MapFn):
+    """
+    A function that performs element-wise division.
+    """
+
+    def __init__(self):
+        super().__init__()
+
+    def apply(self, input_tp: Tuple) -> Tile:
+        if len(input_tp) != 2:
+            raise ValueError("All requires exactly two input types.")
+
+        tile_a, tile_b = input_tp[0], input_tp[1]
+
+        if not (isinstance(tile_a, Tile) and isinstance(tile_b, Tile)):
+            raise TypeError("Both inputs to Div must be of type Tile.")
+
+        # Check if the shapes are broadcastable for element-wise multiplication
+        tile_a_0, tile_a_1 = tile_a.shape
+        tile_b_0, tile_b_1 = tile_b.shape
+
+        # Check broadcastability for dimension 0
+        if not ((tile_a_0 == tile_b_0) or (tile_a_0 == 1) or (tile_b_0 == 1)):
+            raise ValueError(
+                f"Shapes are not broadcastable: {tile_a.shape} and {tile_b.shape}"
+            )
+
+        # Check broadcastability for dimension 1
+        if not ((tile_a_1 == tile_b_1) or (tile_a_1 == 1) or (tile_b_1 == 1)):
+            raise ValueError(
+                f"Shapes are not broadcastable: {tile_a.shape} and {tile_b.shape}"
+            )
+
+        # Calculate the output shape according to broadcast rules
+        output_shape = (max(tile_a_0, tile_b_0), max(tile_a_1, tile_b_1))
+
+        return Tile(tile_dtype=tile_a.tile_dtype, shape=output_shape)
+
+
 class Silu(MapFn):
     """
     A function that applies the SiLU activation function.
@@ -279,6 +318,8 @@ class Exp(MapFn):
 class SetOffset(MapFn):
     """
     A function that sets the offset of a specific tile.
+    - lhs: Tile
+    - rhs: Offset ([1,1] tile)
     """
 
     def __init__(self):
@@ -303,6 +344,8 @@ class RowWiseAppend(MapFn):
     A function that appends a row to a tile.
     This does not change the shape of the tile, but increments the offset by 1 and
     writes the row in the new position.
+    - lhs: Tile (N,D)
+    - rhs: Tile to append (1,D)
     """
 
     def __init__(self):

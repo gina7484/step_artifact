@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
 from typing import Tuple
-from step_py.datatype import DynTile, Tile, MultiHot, Index
+from step_py.datatype import DynTile, Tile, MultiHot, Index, Uint64
 
 
 class AccumFn(ABC):
@@ -109,3 +109,13 @@ class RetileRow(AccumFn):
             raise TypeError("Both inputs must be of type Tile.")
         assert in_tile.shape[1] == accum_tile.shape[1]
         return accum_tile
+
+
+class SignalReqAllRead(AccumFn):
+    def __init__(self):
+        super().__init__()
+
+    def apply(self, input_tp: Tuple) -> Tile:
+        assert len(input_tp) == 1
+
+        return Tile(tile_dtype=Uint64(), shape=(1, 1))
