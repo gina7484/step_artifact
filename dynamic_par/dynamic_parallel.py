@@ -11,6 +11,7 @@ from dataclasses import dataclass
 import random
 from utils.draw_graph import save_graph_format
 from utils.gold_checking import reconstruct_numpy
+import numpy as np
 
 
 @dataclass
@@ -343,8 +344,7 @@ def build_dynmic_par(
     k_cache_loader_list = []
     output_list = []
     for i in range(par_factor):
-        # k_cache_loader, new_channel_dict, store_output = build_flashattn_graph(
-        k_cache_loader, new_channel_dict = build_flashattn_graph(
+        k_cache_loader, new_channel_dict, store_output = build_flashattn_graph(
             par_region_idx=i,
             step_graph=step_graph,
             model_config=model_config,
@@ -369,7 +369,7 @@ def build_dynmic_par(
             channel_dict=channel_dict,
         )
         k_cache_loader_list.append(k_cache_loader)
-        # output_list.append(store_output)
+        output_list.append(store_output)
         channel_dict = new_channel_dict
 
     k_cache_signal_list = [
@@ -451,7 +451,7 @@ def run_dynmic_par(
     duration_s = 0
 
     if simulate_rust in ["full", "timing"]:
-        hbm_config = HBMConfig(64, 8, 2, 2, 1, 14)
+        hbm_config = HBMConfig(64, 32, 2, 2, 1, 14)
         sim_config = SimConfig(
             channel_depth=1,
             functional_sim=simulate_rust == "full",
@@ -496,13 +496,15 @@ def run_dynmic_par(
 
         print(simulated_output.shape)
 
+    return cycles
+
 
 def test_dynamic_par():
     # ====== Model config ======
     model_config = Qwen30B()
 
     # ====== Input config ======
-    batch = 64
+    batch = 16
 
     # ====== Channel config ======
     metadata_fifo_depth = 16
@@ -519,16 +521,36 @@ def test_dynamic_par():
     }
 
     # ====== Cache config ======
-    maxN = 32
-    tile_N = 16
+    maxN = 4160
+    tile_N = 32
     cache_row_offset_tiled = maxN // tile_N
 
     # ====== Data Creation ======
-    k_cache = torch.randn(batch * maxN, model_config.head_dim)
-    v_cache = torch.randn(batch * maxN, model_config.head_dim)
+    k_cache = torch.zeros(batch, maxN, model_config.head_dim)
+    v_cache = torch.zeros(batch, maxN, model_config.head_dim)
 
     random.seed(42)
-    num_token_list = [random.randint(8, 30) for _ in range(batch)]
+    # num_token_list = [random.randint(8, 30) for _ in range(batch)]
+
+    # var = "h"
+    # low = 77
+    # high = 92
+
+    # var = "h"
+    # low = 13
+    # high = 76
+
+    var = "m"
+    low = 179
+    high = 194
+
+    # var = "m"
+    # low = 115
+    # high = 178
+    trace_file = f"dynamic_par/azure_trace/conv_{var}_{low:03d}_{high:03d}.npy"
+    raw_np_arr = np.load(trace_file)
+    np_arr_int = raw_np_arr.astype(np.int64)
+    num_token_list = np_arr_int.tolist()
     print(f"num_token_list: {num_token_list}")
 
     seq_len_tiled = torch.tensor(
@@ -537,6 +559,15 @@ def test_dynamic_par():
 
     offset = torch.tensor([x % tile_N for x in num_token_list])
 
+    # ====== Initialize KV cache ======
+    for i in range(batch):
+        k_cache[i, : num_token_list[i]] = torch.randn(
+            num_token_list[i], model_config.head_dim
+        )
+        v_cache[i, : num_token_list[i]] = torch.randn(
+            num_token_list[i], model_config.head_dim
+        )
+
     run_dynmic_par(
         batch=batch,
         cache_row_offset_tiled=cache_row_offset_tiled,
@@ -544,13 +575,13 @@ def test_dynamic_par():
         metadata_fifo_depth=metadata_fifo_depth,
         cache_write_back_fifo_depth=cache_write_back_fifo_depth,
         model_config=model_config,
-        k_cache=k_cache,
-        v_cache=v_cache,
+        k_cache=k_cache.reshape(batch * maxN, model_config.head_dim),
+        v_cache=v_cache.reshape(batch * maxN, model_config.head_dim),
         seq_len=seq_len_tiled,
         offset=offset,
         compute_bw=compute_bw,
         mock_bf16=True,
         simulate_rust="full",  # "full", "timing", "serialize", None
-        check_gold=True,
+        check_gold=False,
         save_graph=True,
     )

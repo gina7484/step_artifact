@@ -272,7 +272,7 @@ def serialize(graph: MultiDiGraph, protobuf_file: str, functional: bool):
             if functional:
                 file_path = f"{str(op)}.npy"
                 offchipload_pb.npy_path = file_path
-                np.save(file_path, op.underlying.detach().numpy())
+                np.save(file_path, op.underlying.detach().contiguous().numpy())
                 print(f"Saved {str(op)} data to {file_path}")
 
             operator.off_chip_load.CopyFrom(offchipload_pb)
@@ -306,7 +306,7 @@ def serialize(graph: MultiDiGraph, protobuf_file: str, functional: bool):
             if functional:
                 file_path = f"{str(op)}.npy"
                 dyn_offchipload_pb.npy_path = file_path
-                np.save(file_path, op.underlying.detach().numpy())
+                np.save(file_path, op.underlying.detach().contiguous().numpy())
                 print(f"Saved {str(op)} data to {file_path}")
 
             operator.dyn_off_chip_load.CopyFrom(dyn_offchipload_pb)
@@ -332,7 +332,7 @@ def serialize(graph: MultiDiGraph, protobuf_file: str, functional: bool):
             if functional:
                 file_path = f"{str(op)}.npy"
                 randomoffchipload_pb.npy_path = file_path
-                np.save(file_path, op.underlying.detach().numpy())
+                np.save(file_path, op.underlying.detach().contiguous().numpy())
                 print(f"Saved {str(op)} data to {file_path}")
 
             operator.random_off_chip_load.CopyFrom(randomoffchipload_pb)
@@ -364,7 +364,7 @@ def serialize(graph: MultiDiGraph, protobuf_file: str, functional: bool):
             if functional:
                 file_path = f"{str(op)}.npy"
                 randomoffchipstore_pb.npy_path = file_path
-                np.save(file_path, op.underlying.detach().numpy())
+                np.save(file_path, op.underlying.detach().contiguous().numpy())
                 print(f"Saved {str(op)} data to {file_path}")
 
             randomoffchipstore_pb.tile_row = op.tile_row
@@ -665,7 +665,6 @@ def serialize(graph: MultiDiGraph, protobuf_file: str, functional: bool):
 
             parallelize_pb.parallelize_rank = op.parallelize_rank
             parallelize_pb.num_consumers = op.num_consumers
-            parallelize_pb.per_region_input = op.per_region_input
             parallelize_pb.switch_cycles.extend(list(op.switch_cycles))
             parallelize_pb.write_back_mu = op.write_back_mu
 
@@ -810,7 +809,7 @@ def serialize(graph: MultiDiGraph, protobuf_file: str, functional: bool):
 
             file_path = f"{str(op)}.npy"
             selectgen_pb.npy_path = file_path
-            np.save(file_path, op.underlying.detach().numpy())
+            np.save(file_path, op.underlying.detach().contiguous().numpy())
             print(f"Saved {str(op)} data to {file_path}")
 
             operator.select_gen.CopyFrom(selectgen_pb)
@@ -830,7 +829,7 @@ def serialize(graph: MultiDiGraph, protobuf_file: str, functional: bool):
 
             file_path = f"{str(op)}.npy"
             metadatagen_pb.npy_path = file_path
-            np.save(file_path, op.underlying.detach().numpy())
+            np.save(file_path, op.underlying.detach().contiguous().numpy())
             print(f"Saved {str(op)} data to {file_path}")
 
             operator.metadata_gen.CopyFrom(metadatagen_pb)

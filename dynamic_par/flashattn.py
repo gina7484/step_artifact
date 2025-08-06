@@ -1,3 +1,4 @@
+from types import NoneType
 from networkx import MultiDiGraph
 from typing import Dict, Union, Tuple, List
 from itertools import count
@@ -175,8 +176,6 @@ def build_flashattn_graph(
         min_rank=0,
         max_rank=1,
     )
-
-    sink_kcache_output = ConsumerContext(graph=step_graph, input=formatted_k_cache)
 
     # ------------ Stage 3: Wrte back the last tile with the new key and value appended to the KV cache ------------
     k_cache_write_back_addr = BinaryMap(
@@ -430,26 +429,6 @@ def build_flashattn_graph(
         compute_bw=compute_bw["intra_tile_rowsum"],
     )
 
-    # # input shape:  [DynB,]  (tile: [query_per_kvhead,1])
-    # # output shape: [DynB,1] (tile: [query_per_kvhead,1])
-    # reshape_for_expand = Reshape(
-    #     graph=step_graph,
-    #     input=intra_tile_rowsum,
-    #     chunk_size=1,
-    #     reshape_rank=0,
-    #     write_back_mu=False,
-    # )
-
-    # # input shape:  [DynB,1]    (tile: [query_per_kvhead,1])
-    # # ref shape:    [DynB,DynN] (tile: [query_per_kvhead,D])
-    # # output shape: [DynB,DynN] (tile: [query_per_kvhead,1])
-    # expand_ref = ExpandRef(
-    #     graph=step_graph,
-    #     input=reshape_for_expand,
-    #     ref=mult_v,
-    #     expand_rank=1,
-    # )
-
     # input1 shape: [DynB,] (tile: [query_per_kvhead,D])
     # input2 shape: [DynB,] (tile: [query_per_kvhead,1])
     # output shape: [DynB,] (tile: [query_per_kvhead,D])
@@ -478,5 +457,5 @@ def build_flashattn_graph(
         graph=step_graph,
         input=store_output,
     )
-
-    return k_cache, channel_dict  # , store_output
+    store_output = NoneType
+    return k_cache, channel_dict, store_output
