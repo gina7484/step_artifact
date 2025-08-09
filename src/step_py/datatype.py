@@ -100,7 +100,7 @@ class DynTile:
         return total_elements * self.tile_dtype.size_in_bytes()
 
     def __str__(self) -> str:
-        return f"Tile({self.tile_dtype}, {self.shape})"
+        return f"DynTile({self.tile_dtype}, {self.shape})"
 
 
 @dataclass
