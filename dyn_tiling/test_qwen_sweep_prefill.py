@@ -5,8 +5,8 @@ import csv
 import time
 
 from dyn_tiling.test_weight_stationary_gemm import run_ws_tile_mn_mk
-from dyn_tiling.test_weight_stationary_gemm_revet import run_ws_tile_mn_mk_revet
 from dyn_tiling.test_weight_stationary_gemm_dyn_tile import run_ws_tile_mn_mk_dyn_tile
+from dyn_tiling.test_weight_stationary_gemm_revet import run_ws_tile_mn_mk_revet
 
 # from step_py.ops import *
 # from step_py.functions import map_accum_fn, map_fn, init_fn, accum_fn
@@ -49,16 +49,16 @@ def test_gemm_sweep():
     # model_config = TinyQwen30b()
     model_config = Qwen30b()
 
-    tile_Ns = [64, 16]  # For the batch dim (64)
+    tile_Ns = [1024, 256]  # For the batch dim (64)
     tile_Fs = [64]  # For the model_config.moe_inter_dim
 
     # ------------ Expert Indices ------------
-    iter = 32
-    layer = 12
-    expert_selection_file = f"/home/ginasohn/expert_routing/processed_qwen/expr_per_layer/iter_{iter:03d}_layer_{layer:03d}.npz"
+    batch = 1024  # 256, 512, 1024
+    layer = 24  # 0 (even), 24 (middle), 30 (uneven)
+    expert_selection_file = f"/home/ginasohn/expert_routing/processed_qwen/expr_large_b/token1_layer{layer}_b{batch}.npz"
     expert_indices_npz = np.load(expert_selection_file)
     expert_indices = torch.from_numpy(
-        expert_indices_npz["data"]
+        expert_indices_npz["arr_0"]
     )  # [B, n_activated_experts]
 
     # expert_counts: [n_routed_experts] (bincount across all batches)
@@ -80,12 +80,11 @@ def test_gemm_sweep():
         for tile_F in tile_Fs:
             out_file = (
                 f"/home/ginasohn/step_tl/dyn_tiling/"
-                + f"qwen_{model_config.dim}_{model_config.moe_inter_dim}_"
-                + f"iter{iter:03d}_layer_{layer:03d}_n{tile_N}_f{tile_F}_"
+                + f"qwen_b{batch}_{model_config.dim}_{model_config.moe_inter_dim}_"
+                + f"layer_{layer:03d}_n{tile_N}_f{tile_F}_"
                 + f"{time.strftime("%d%H%M%S")}.csv"
             )
             # out_file = None
-
             results = []
 
             off_chip_traffic, on_chip_requirement, cycles, duration_s = (
@@ -143,17 +142,13 @@ def test_gemm_sweep():
             )
 
             free_symbols = sorted(off_chip_traffic.free_symbols, key=str)
-            # print(f"free_symbols: {free_symbols}")
 
             sub_dict = {
                 symbol: value
                 for symbol, value in zip(free_symbols, expert_counts.tolist())
             }
 
-            # print(f"off_chip_traffic: {off_chip_traffic}")
-            # print(f"sub_dict: {sub_dict}")
             off_chip_traffic_val = off_chip_traffic.subs(sub_dict)
-            # print(f"off_chip_traffic_val: {off_chip_traffic_val}")
 
             dict_to_append = {
                 "batch": B,
@@ -208,12 +203,12 @@ def test_gemm_dyn_tile():
     tile_Fs = [64]  # For the model_config.moe_inter_dim
 
     # ------------ Expert Indices ------------
-    iter = 32
-    layer = 12
-    expert_selection_file = f"/home/ginasohn/expert_routing/processed_qwen/expr_per_layer/iter_{iter:03d}_layer_{layer:03d}.npz"
+    batch = 1024  # 256, 512, 1024
+    layer = 24  # 0 (even), 24 (middle), 30 (uneven)
+    expert_selection_file = f"/home/ginasohn/expert_routing/processed_qwen/expr_large_b/token1_layer{layer}_b{batch}.npz"
     expert_indices_npz = np.load(expert_selection_file)
     expert_indices = torch.from_numpy(
-        expert_indices_npz["data"]
+        expert_indices_npz["arr_0"]
     )  # [B, n_activated_experts]
 
     # expert_counts: [n_routed_experts] (bincount across all batches)
@@ -232,16 +227,15 @@ def test_gemm_dyn_tile():
     input_tensor = torch.randn(B, model_config.dim)
 
     for tile_F in tile_Fs:
-        # ------------ Output file ------------
+        results = []
+
         out_file = (
             f"/home/ginasohn/step_tl/dyn_tiling/"
-            + f"qwen_{model_config.dim}_{model_config.moe_inter_dim}_"
-            + f"round_{round_N}_iter{iter:03d}_layer_{layer:03d}_"
-            + f"n_dyn_f{tile_F}_{time.strftime("%d%H%M%S")}.csv"
+            + f"qwen_b{batch}_{model_config.dim}_{model_config.moe_inter_dim}_"
+            + f"round_{round_N}_layer_{layer:03d}_n_dyn_f{tile_F}_"
+            + f"{time.strftime("%d%H%M%S")}.csv"
         )
         # out_file = None
-
-        results = []
 
         (
             off_chip_traffic,
@@ -300,36 +294,28 @@ def test_gemm_dyn_tile():
         )
         # --------------- off-chip traffic ---------------
         free_symbols = sorted(off_chip_traffic.free_symbols, key=str)
-        # print(f"off_chip_traffic free_symbols: {free_symbols}")
 
         sub_dict = {
             symbol: value for symbol, value in zip(free_symbols, expert_counts.tolist())
         }
         # print(f"off_chip_traffic: {off_chip_traffic}")
-        # print(f"off_chip_traffic sub_dict: {sub_dict}")
 
         off_chip_traffic_val = off_chip_traffic.subs(sub_dict)
 
         # --------------- On-chip requirement ---------------
         free_symbols = sorted(on_chip_requirement.free_symbols, key=str)
-        # print(f"on_chip_traffic free_symbols: {free_symbols}")
 
         sub_dict = {
             symbol: value for symbol, value in zip(free_symbols, expert_counts.tolist())
         }
-        # print(f"on_chip_traffic: {on_chip_requirement}")
-        # print(f"on_chip_traffic sub_dict: {sub_dict}")
 
         on_chip_requirement_val = on_chip_requirement.subs(sub_dict)
+
         print(f"on_chip_requirement_val: {on_chip_requirement_val}")
         on_chip_requirement_val = (
             on_chip_requirement_val
             - expert_counts.tolist().count(0) * unit_expert_on_chip
         )
-        # subtract the on-chip requirement for unselected experts weight load assuming on-chip memory is allocated on-demand
-
-        # print(f"on_chip_requirement_val after subtract: {on_chip_requirement_val}")
-
         dict_to_append = {
             "batch": B,
             "round_N": round_N,
@@ -378,16 +364,16 @@ def test_gemm_revet_sweep():
     # model_config = TinyQwen30b()
     model_config = Qwen30b()
 
-    tile_Ns = [64, 16]  # For the batch dim (64)
+    tile_Ns = [1024, 256]  # For the batch dim (64)
     tile_Fs = [64]  # For the model_config.moe_inter_dim
 
     # ------------ Expert Indices ------------
-    iter = 32
-    layer = 12
-    expert_selection_file = f"/home/ginasohn/expert_routing/processed_qwen/expr_per_layer/iter_{iter:03d}_layer_{layer:03d}.npz"
+    batch = 1024  # 256, 512, 1024
+    layer = 24  # 0 (even), 24 (middle), 30 (uneven)
+    expert_selection_file = f"/home/ginasohn/expert_routing/processed_qwen/expr_large_b/token1_layer{layer}_b{batch}.npz"
     expert_indices_npz = np.load(expert_selection_file)
     expert_indices = torch.from_numpy(
-        expert_indices_npz["data"]
+        expert_indices_npz["arr_0"]
     )  # [B, n_activated_experts]
 
     # expert_counts: [n_routed_experts] (bincount across all batches)
@@ -407,16 +393,15 @@ def test_gemm_revet_sweep():
 
     for tile_N in tile_Ns:
         for tile_F in tile_Fs:
-            # ------------ Output file ------------
+            results = []
+
             out_file = (
                 f"/home/ginasohn/step_tl/dyn_tiling/"
-                + f"qwen_{model_config.dim}_{model_config.moe_inter_dim}_"
-                + f"iter{iter:03d}_layer_{layer:03d}_n{tile_N}_f{tile_F}_revet_"
+                + f"qwen_b{batch}_{model_config.dim}_{model_config.moe_inter_dim}_"
+                + f"layer_{layer:03d}_n{tile_N}_f{tile_F}_revet_"
                 + f"{time.strftime("%d%H%M%S")}.csv"
             )
             # out_file = None
-
-            results = []
 
             (
                 off_chip_traffic,

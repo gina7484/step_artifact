@@ -15,7 +15,7 @@ from rewrite.broadcast import infer_broadcast
 from utils.moe import *
 
 
-def ws_tile_mn_mk_gemm_reshape_dyn_tile(
+def ws_tile_mn_mk_gemm_reshape_revet(
     step_graph: MultiDiGraph,
     model_config,
     batch: int,
@@ -33,15 +33,16 @@ def ws_tile_mn_mk_gemm_reshape_dyn_tile(
     w_gate_list: list[torch.Tensor],
     w_up_list: list[torch.Tensor],
     w_down_list: list[torch.Tensor],
-    round_N: int,
+    tile_N: int,  # M
     tile_F: int,  # Gate & Up (K), Down (N)
     mock_bf16: bool,
 ) -> Tuple[OffChipStore, int]:
     par_dispatch = 1
-    F = model_config.moe_inter_dim
-    D = model_config.dim
 
     unit_expert_on_chip = 0
+
+    F = model_config.moe_inter_dim
+    D = model_config.dim
 
     # ------------ Stage 1: Load input tensor ------------
     # - tensor shape: [B, D]
@@ -112,47 +113,50 @@ def ws_tile_mn_mk_gemm_reshape_dyn_tile(
 
     # - input stream shape: [Dyn] x n_routed_experts (tile: [1, D])
     # - output stream:
-    #   - after reshape: [dyn_1, ((Dyn + round_N -1) // round_N),  round_N] x n_routed_experts (tile: [1, D])
-    #   - after flatten: [dyn_1, ((Dyn + round_N -1) // round_N) * round_N] x n_routed_experts (tile: [1, D])
-    round_to_16 = [
-        Flatten(
+    #   - After Reshape: [dyn_1, (Dyn + tile_N -1) // tile_N, tile_N] x n_routed_experts (tile: [1, D])
+    #   - After Flatten: [(Dyn + tile_N -1) // tile_N, tile_N] x n_routed_experts (tile: [1, D])
+    #   - After Accum:   [(Dyn + tile_N -1) // tile_N]         x n_routed_experts (tile: [tile_N, D])
+
+    reshaped_expert_feature_streams = [
+        Reshape(
             step_graph,
-            Reshape(
-                step_graph,
-                (unchunked_expert_feature_streams, i),
-                round_N,
-                0,
-                write_back_mu=False,
-                add_outer_dim=True,
-                pad_fn=init_fn.Zero(shape=(1, D), dtype=Float32()),
-            ),
-            min_rank=0,
-            max_rank=1,
+            (unchunked_expert_feature_streams, i),
+            tile_N,
+            0,
+            write_back_mu=False,
+            add_outer_dim=True,
+            pad_fn=init_fn.Zero(shape=(1, D), dtype=Float32()),
         )
         for i in range(model_config.n_routed_experts)
     ]
 
-    # - input stream shape: [dyn_1, ((Dyn + round_N -1) // round_N) * round_N] x n_routed_experts (tile: [1, D])
-    # - output stream: [dyn_1] x n_routed_experts (tile: [((Dyn + round_N -1) // round_N) * round_N, D])
+    # In this case, we don't need to specify the outermost 1 is a dynamic dim
+    # as it gets flattened with the dyn dim
+
     expert_feature_streams = [
         Accum(
             step_graph,
-            stream_i,
-            DynTile(
-                tile_dtype=Float32(), shape=(stream_i.stream.shape[1], D)
-            ),  # output type
+            Flatten(
+                step_graph,
+                reshaped_expert_feature_streams[i],
+                min_rank=1,
+                max_rank=2,
+            ),
+            Tile(tile_dtype=Float32(), shape=(tile_N, D)),  # output type
             accum_fn.RetileRow(),
             init_fn.Empty(shape=(0, D), dtype=Float32()),
             1,
             False,
-            1024,
+            accum_compute_bw,
         )
-        for stream_i in round_to_16
-    ]
+        for i in range(model_config.n_routed_experts)
+    ]  # [dyn_1 * (Dyn + tile_N -1) // tile_N] of tile_N x D
+
+    unit_expert_on_chip += expert_feature_streams[0].on_chip_requirement()
 
     # ------------ Stage 5: Repeat input features ------------
-    # - input stream shape:   [dyn_1] x n_routed_experts (tile: [((Dyn + round_N -1) // round_N) * round_N, D])
-    # - output stream shape:  [dyn_1, F // tile_F] x n_routed_experts (tile: [((Dyn + round_N -1) // round_N) * round_N, D])
+    # - input stream shape:   [(Dyn + tile_N -1) // tile_N] x n_routed_experts (tile: [tile_N, D])
+    # - output stream shape:  [(Dyn + tile_N -1) // tile_N, F // tile_F] x n_routed_experts (tile: [tile_N, D])
     repeated_feature_streams = [
         RepeatStatic(
             step_graph,
@@ -162,10 +166,13 @@ def ws_tile_mn_mk_gemm_reshape_dyn_tile(
         for i in range(model_config.n_routed_experts)
     ]
 
+    unit_expert_on_chip += repeated_feature_streams[0].on_chip_requirement()
+
     # ------------ Stage 6: Load up parameters ------------
-    # Here, the weight tiles have to be read in a transposed order as we tile the N
     # - tensor shape: [D, F]
-    # - output stream shape:  [dyn_1, F // tile_F, 1] (tile: [D, tile_F])
+    # - ref stream shape:    [(Dyn + tile_N -1) // tile_N]
+    # - per tensor stream shape:                          [F // tile_F, 1] (tile: [D, tile_F])
+    # - output stream shape: [(Dyn + tile_N -1) // tile_N, F // tile_F, 1] (tile: [D, tile_F])
     up_loads = [
         DynOffChipLoad(
             graph=step_graph,
@@ -183,8 +190,8 @@ def ws_tile_mn_mk_gemm_reshape_dyn_tile(
 
     unit_expert_on_chip += up_loads[0].on_chip_requirement()
 
-    # - input stream shape:  [1, F // tile_F, 1] (tile: [D, tile_F])
-    # - output stream shape: [1, F // tile_F]    (tile: [D, tile_F])
+    # - input stream shape:   [(Dyn + tile_N -1) // tile_N, F // tile_F, 1] (tile: [D, tile_F])
+    # - output stream shape:  [(Dyn + tile_N -1) // tile_N, F // tile_F]    (tile: [D, tile_F])
     ready_up_loads = [
         Flatten(
             graph=step_graph,
@@ -196,15 +203,15 @@ def ws_tile_mn_mk_gemm_reshape_dyn_tile(
     ]
 
     # ------------ Stage 7: Compute the up features ------------
-    # - input stream shape:  [dyn_1, F // tile_F] (tile: [((Dyn + round_N -1) // round_N) * round_N, D])
-    # - weight stream shape: [dyn_1, F // tile_F] (tile: [D, tile_F])
-    # - output stream shape: [dyn_1, F // tile_F] (tile: [((Dyn + round_N -1) // round_N) * round_N, tile_F])
+    # - input stream shape:   [(Dyn + tile_N -1) // tile_N, F // tile_F] (tile: [tile_N, D])
+    # - weight stream shape:  [(Dyn + tile_N -1) // tile_N, F // tile_F] (tile: [D, tile_F])
+    # - output stream shape:  [(Dyn + tile_N -1) // tile_N, F // tile_F] (tile: [tile_N, tile_F])
     up_feature_streams = [
         BinaryMap(
             step_graph,
             feature,
             weight,
-            map_fn.DynMatmul(weight_transposed=False),
+            map_fn.Matmul(weight_transposed=False),
             False,
             up_compute_bw,
         )
@@ -212,9 +219,10 @@ def ws_tile_mn_mk_gemm_reshape_dyn_tile(
     ]
 
     # ------------ Stage 8: Load gate parameters ------------
-    # Here, the weight tiles have to be read in a transposed order as we tile the N
     # - tensor shape: [D, F]
-    # - output stream shape: [dyn_1, F // tile_F, 1] (tile: [D, tile_F])
+    # - ref stream shape:    [(Dyn + tile_N -1) // tile_N]
+    # - per tensor stream shape:                          [F // tile_F, 1] (tile: [D, tile_F])
+    # - output stream shape: [(Dyn + tile_N -1) // tile_N, F // tile_F, 1] (tile: [D, tile_F])
     gate_loads = [
         DynOffChipLoad(
             graph=step_graph,
@@ -232,8 +240,8 @@ def ws_tile_mn_mk_gemm_reshape_dyn_tile(
 
     unit_expert_on_chip += gate_loads[0].on_chip_requirement()
 
-    # - input stream shape:  [1, F // tile_F, 1] (tile: [D, tile_F])
-    # - output stream shape: [1, F // tile_F]    (tile: [D, tile_F])
+    # - input stream shape:   [(Dyn + tile_N -1) // tile_N, F // tile_F, 1] (tile: [D, tile_F])
+    # - output stream shape:  [(Dyn + tile_N -1) // tile_N, F // tile_F]    (tile: [D, tile_F])
     ready_gate_loads = [
         Flatten(
             graph=step_graph,
@@ -245,15 +253,15 @@ def ws_tile_mn_mk_gemm_reshape_dyn_tile(
     ]
 
     # ------------ Stage 8: Compute the gate features ------------
-    # - input stream shape:  [dyn_1, F // tile_F] (tile: [((Dyn + round_N -1) // round_N) * round_N, D])
-    # - weight stream shape: [dyn_1, F // tile_F] (tile: [D, tile_F])
-    # - output stream shape: [dyn_1, F // tile_F] (tile: [((Dyn + round_N -1) // round_N) * round_N, tile_F])
+    # - input stream shape:   [(Dyn + tile_N -1) // tile_N, F // tile_F] (tile: [tile_N, D])
+    # - weight stream shape:  [(Dyn + tile_N -1) // tile_N, F // tile_F] (tile: [D, tile_F])
+    # - output stream shape:  [(Dyn + tile_N -1) // tile_N, F // tile_F] (tile: [tile_N, tile_F])
     pre_act_gate_feature_streams = [
         BinaryMap(
             step_graph,
             feature,
             weight,
-            map_fn.DynMatmul(weight_transposed=False),
+            map_fn.Matmul(weight_transposed=False),
             False,
             gate_compute_bw,
         )
@@ -261,8 +269,8 @@ def ws_tile_mn_mk_gemm_reshape_dyn_tile(
     ]
 
     # ------------ Stage 9: Compute the activation ------------
-    # - input stream shape:  [dyn_1, F // tile_F] (tile: [((Dyn + round_N -1) // round_N) * round_N, tile_F])
-    # - output stream shape: [dyn_1, F // tile_F] (tile: [((Dyn + round_N -1) // round_N) * round_N, tile_F])
+    # - input stream shape:   [(Dyn + tile_N -1) // tile_N, F // tile_F] (tile: [tile_N, tile_F])
+    # - output stream shape:  [(Dyn + tile_N -1) // tile_N, F // tile_F] (tile: [tile_N, tile_F])
     gate_feature_streams = [
         UnaryMap(
             graph=step_graph,
@@ -275,9 +283,9 @@ def ws_tile_mn_mk_gemm_reshape_dyn_tile(
     ]
 
     # ------------ Stage 10: Compute the projected features ------------
-    # - input1 stream shape:  [dyn_1, F // tile_F] (tile: [((Dyn + round_N -1) // round_N) * round_N, tile_F])
-    # - input2 stream shape:  [dyn_1, F // tile_F] (tile: [((Dyn + round_N -1) // round_N) * round_N, tile_F])
-    # - output stream shape:  [dyn_1, F // tile_F] (tile: [((Dyn + round_N -1) // round_N) * round_N, tile_F])
+    # - input1 stream shape:   [(Dyn + tile_N -1) // tile_N, F // tile_F] (tile: [tile_N1, tile_F])
+    # - input2 stream shape:   [(Dyn + tile_N -1) // tile_N, F // tile_F] (tile: [tile_N, tile_F])
+    # - output stream shape:   [(Dyn + tile_N -1) // tile_N, F // tile_F] (tile: [tile_N, tile_F])
     projected_feature_streams = [
         BinaryMap(
             step_graph, up_feature, gate_feature, map_fn.Mul(), False, mult_compute_bw
@@ -286,11 +294,10 @@ def ws_tile_mn_mk_gemm_reshape_dyn_tile(
     ]
 
     # ------------ Stage 11: Load down parameters ------------
-    # Here, the weight tiles don't have to be read in a transposed order as we don't
-    # tile the N dimension for the down linear.
     # - tensor shape: [F, D]
-    # - per tensor stream shape: [F // tile_F, 1] (tile: [tile_F, D])
-    # - output stream shape: [dyn_1, F // tile_F, 1] (tile: [tile_F, D])
+    # - ref stream shape:    [(Dyn + tile_N -1) // tile_N]
+    # - per tensor stream shape:                          [F // tile_F, 1] (tile: [tile_F, D])
+    # - output stream shape: [(Dyn + tile_N -1) // tile_N, F // tile_F, 1] (tile: [tile_F, D])
     down_loads = [
         DynOffChipLoad(
             graph=step_graph,
@@ -308,8 +315,8 @@ def ws_tile_mn_mk_gemm_reshape_dyn_tile(
 
     unit_expert_on_chip += down_loads[0].on_chip_requirement()
 
-    # - input stream shape:  [dyn_1, F // tile_F, 1] (tile: [tile_F, D])
-    # - output stream shape: [dyn_1, F // tile_F]    (tile: [tile_F, D])
+    # - input stream shape:   [(Dyn + tile_N -1) // tile_N, F // tile_F, 1] (tile: [tile_F, D])
+    # - output stream shape:  [(Dyn + tile_N -1) // tile_N, F // tile_F] (tile: [tile_F, D])
     ready_down_loads = [
         Flatten(
             graph=step_graph,
@@ -321,16 +328,16 @@ def ws_tile_mn_mk_gemm_reshape_dyn_tile(
     ]
 
     # ------------ Stage 12: Compute the down features ------------
-    # - input stream shape:  [dyn_1, F // tile_F] (tile: [((Dyn + round_N -1) // round_N) * round_N, tile_F])
-    # - weight stream shape: [dyn_1, F // tile_F] (tile: [tile_F, D])
-    # - output stream shape: [dyn_1]              (tile: [((Dyn + round_N -1) // round_N) * round_N, D])
+    # - input stream shape:   [(Dyn + tile_N -1) // tile_N, F // tile_F] (tile: [tile_N, tile_F])
+    # - weight stream shape:  [(Dyn + tile_N -1) // tile_N, F // tile_F] (tile: [tile_F, D])
+    # - output stream shape:  [(Dyn + tile_N -1) // tile_N]              (tile: [tile_N, D])
     chunked_down_feature_streams = [
         BinaryMapAccum(
             step_graph,
             feature,
             weight,
-            map_accum_fn.DynMatmul(weight_transposed=False),
-            init_fn.Empty(shape=(0, D), dtype=Float32()),
+            map_accum_fn.Matmul(weight_transposed=False),
+            init_fn.Zero(shape=(tile_N, D), dtype=Float32()),
             1,
             False,
             down_compute_bw,
@@ -338,9 +345,11 @@ def ws_tile_mn_mk_gemm_reshape_dyn_tile(
         for feature, weight in zip(projected_feature_streams, ready_down_loads)
     ]
 
+    unit_expert_on_chip += chunked_down_feature_streams[0].on_chip_requirement()
+
     # ------------ Stage 12.5: Partition & Retile outputs for each expert ------------
-    # - input stream shape:  [dyn_1] (tile: [((Dyn + round_N -1) // round_N) * round_N, D])
-    # - output stream shape: [Dyn] (tile: [1, D])
+    # - input stream shape:  [(Dyn + tile_N -1) // tile_N] (tile: [tile_N, D])
+    # - output stream shape: [Dyn_retile]                  (tile: [1, D])
     down_feature_streams = [
         RetileStreamify(
             graph=step_graph,
@@ -390,6 +399,24 @@ def ws_tile_mn_mk_gemm_reshape_dyn_tile(
         for i in range(model_config.n_routed_experts)
     ]
 
+    # idx_to_print = 4
+    # # Expert counts: tensor([21, 21, 11, 16, 16, 12, 12, 19])
+    # for i in range(model_config.n_routed_experts):
+    #     if i == idx_to_print:
+    #         consume = ConsumerContext(
+    #             graph=step_graph,
+    #             input=(expert_weight_streams, i),
+    #         )
+
+    #         printc = PrinterContext(
+    #             graph=step_graph,
+    #             input=down_feature_streams[i],
+    #         )
+    #     else:
+    #         con_i = ConsumerContext(graph=step_graph, input=(expert_weight_streams, i))
+
+    #         con_f = ConsumerContext(graph=step_graph, input=down_feature_streams[i])
+
     # ------------ Stage 15: Reassemble the weighted features ------------
     # Reassemble
     feature_select_gen_reassemble = SelectGen(
@@ -434,7 +461,7 @@ def ws_tile_mn_mk_gemm_reshape_dyn_tile(
     return output, unit_expert_on_chip
 
 
-def call_ws_tile_mn_mk_gemm_reshape_dyn_tile(
+def call_ws_tile_mn_mk_gemm_reshape_revet(
     model_config,
     batch: int,
     gate_compute_bw: int,
@@ -451,7 +478,7 @@ def call_ws_tile_mn_mk_gemm_reshape_dyn_tile(
     w_gate_list: list[torch.Tensor],
     w_up_list: list[torch.Tensor],
     w_down_list: list[torch.Tensor],
-    round_N: int,
+    tile_N: int,
     tile_F: int,
     save_graph: bool,
     simulate_rust: str,
@@ -461,7 +488,7 @@ def call_ws_tile_mn_mk_gemm_reshape_dyn_tile(
     step_graph = MultiDiGraph()
 
     output: OffChipStore
-    output, unit_expert_on_chip = ws_tile_mn_mk_gemm_reshape_dyn_tile(
+    output, unit_expert_on_chip = ws_tile_mn_mk_gemm_reshape_revet(
         step_graph=step_graph,
         model_config=model_config,
         batch=batch,
@@ -479,7 +506,7 @@ def call_ws_tile_mn_mk_gemm_reshape_dyn_tile(
         w_gate_list=w_gate_list,
         w_up_list=w_up_list,
         w_down_list=w_down_list,
-        round_N=round_N,
+        tile_N=tile_N,
         tile_F=tile_F,
         mock_bf16=mock_bf16,
     )
@@ -490,7 +517,7 @@ def call_ws_tile_mn_mk_gemm_reshape_dyn_tile(
 
     if save_graph:
         OUTPUT_FILENAME = "moe_expert_par_gemm_reshape"
-        save_graph_format(step_graph, OUTPUT_FILENAME, ["svg"])
+        save_graph_format(step_graph, OUTPUT_FILENAME, ["png"])
 
     total_off_chip_traffic = sympy.Integer(0)
     total_on_chip_requirement = sympy.Integer(0)
@@ -554,8 +581,118 @@ def call_ws_tile_mn_mk_gemm_reshape_dyn_tile(
     )
 
 
-def run_ws_tile_mn_mk_dyn_tile(
-    round_N: int,
+@dataclass
+class DeepSeekV316B:
+    n_routed_experts = 64
+    n_activated_experts = 6
+    dim = 2048
+    moe_inter_dim = 1408
+
+
+@dataclass
+class SmallerDeepSeekV3:
+    n_routed_experts = 64
+    n_activated_experts = 6
+    dim = 64  # 2048 // 32 = 64
+    moe_inter_dim = 352  # 1408 // 4 (Can use tile size of 32)
+
+
+@dataclass
+class SmallerMixtral:  # 32x scaled down version for each dimension
+    n_routed_experts = 8
+    n_activated_experts = 2
+    dim = 128  # 4096/32
+    moe_inter_dim = 448  # 14336/32 (Can use tile size of 64)
+
+
+@dataclass
+class SmallerQwen30b:  # 16x scaled down version for each dimension
+    n_routed_experts = 128
+    n_activated_experts = 8
+    dim = 128  # 2048 // 16
+    moe_inter_dim = 48  # 768 // 16
+
+
+@dataclass
+class Qwen30b:
+    n_routed_experts = 128
+    n_activated_experts = 8
+    dim = 2048  # https://huggingface.co/Qwen/Qwen3-30B-A3B/blob/main/config.json#L12
+    moe_inter_dim = (
+        768  # https://huggingface.co/Qwen/Qwen3-30B-A3B/blob/main/config.json#L19
+    )
+
+
+@dataclass
+class Mixtral8x7b:
+    n_routed_experts = 8
+    n_activated_experts = 2
+    dim = 4096
+    moe_inter_dim = 14336
+
+
+def get_expert_selection(
+    B: int, model_config, seed: Optional[int]
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if seed is None:
+        # Calculate ideal total that's divisible by number of experts
+        ideal_per_expert = (
+            B * model_config.n_activated_experts
+        ) // model_config.n_routed_experts
+        total_selections = ideal_per_expert * model_config.n_routed_experts
+
+        # Generate perfectly balanced expert assignments
+        expert_list = []
+        for expert_id in range(model_config.n_routed_experts):
+            expert_list.extend([expert_id] * ideal_per_expert)
+
+        # Shuffle and truncate/pad to fit your batch structure
+        import random
+
+        random.shuffle(expert_list)
+
+        # Reshape to fit your original structure (may need padding/truncating)
+        if len(expert_list) != B * model_config.n_activated_experts:
+            # Handle the mismatch - either pad or truncate
+            target_length = B * model_config.n_activated_experts
+            if len(expert_list) < target_length:
+                # Pad by cycling through experts
+                while len(expert_list) < target_length:
+                    expert_list.append(
+                        expert_list[len(expert_list) % model_config.n_routed_experts]
+                    )
+            else:
+                # Truncate
+                expert_list = expert_list[:target_length]
+
+        expert_indices = torch.tensor(expert_list).reshape(
+            B, model_config.n_activated_experts
+        )
+
+        expert_counts = torch.bincount(
+            expert_indices.flatten(), minlength=model_config.n_routed_experts
+        )
+
+        return (expert_indices, expert_counts)
+    else:
+        torch.manual_seed(seed)
+        # [B, n_activated_experts]
+        expert_indices = torch.topk(
+            torch.randn(B, model_config.n_routed_experts),
+            model_config.n_activated_experts,
+            dim=-1,
+        )[1]
+
+        # Get bincount across all batches [n_routed_experts]
+        expert_counts = torch.bincount(
+            expert_indices.flatten(), minlength=model_config.n_routed_experts
+        )
+
+        return (expert_indices, expert_counts)
+
+
+def run_ws_tile_mn_mk_revet(
+    tile_N: int,  # M (The number of requests to chunk for the GEMM in each expert)
     tile_F: int,  # K (The tile size used for the model_config.dim dimension)
     input_tensor,
     expert_indices,
@@ -573,13 +710,13 @@ def run_ws_tile_mn_mk_dyn_tile(
     # For Gate & Up linear, we use TileMN. For Down linear, we use TileMK.
 
     # ------------ Compute Bandwidths ------------
-    GATE_COMPUTE_BW = 6400
-    UP_COMPUTE_BW = 6400
-    ACT_FN_COMPUTE_BW = 6400
-    MULT_COMPUTE_BW = 6400
-    DOWN_COMPUTE_BW = 6400
-    WEIGHT_SCALE_COMPUTE_BW = 6400
-    ACCUM_COMPUTE_BW = 6400
+    GATE_COMPUTE_BW = 4096
+    UP_COMPUTE_BW = 4096
+    ACT_FN_COMPUTE_BW = 4096
+    MULT_COMPUTE_BW = 4096
+    DOWN_COMPUTE_BW = 4096
+    WEIGHT_SCALE_COMPUTE_BW = 4096
+    ACCUM_COMPUTE_BW = 4096
 
     # ------------ Input generation ------------
     input_tensor = torch.randn(B, model_config.dim)
@@ -628,7 +765,7 @@ def run_ws_tile_mn_mk_dyn_tile(
     off_chip_traffic: sympy.Expr
     on_chip_requirement: sympy.Expr
 
-    output, off_chip_traffic, on_chip_requirement, cycles, duration_s, unit_expert_on_chip = call_ws_tile_mn_mk_gemm_reshape_dyn_tile(  # type: ignore (Cannot infer type of output properly)
+    output, off_chip_traffic, on_chip_requirement, cycles, duration_s, unit_expert_on_chip = call_ws_tile_mn_mk_gemm_reshape_revet(  # type: ignore (Cannot infer type of output properly)
         model_config=model_config,
         batch=B,
         gate_compute_bw=GATE_COMPUTE_BW,
@@ -645,8 +782,8 @@ def run_ws_tile_mn_mk_dyn_tile(
         w_gate_list=w_gate_list,
         w_up_list=w_up_list,
         w_down_list=w_down_list,
-        round_N=round_N,
         tile_F=tile_F,
+        tile_N=tile_N,
         save_graph=False,
         simulate_rust=simulate_rust,
         mock_bf16=mock_bf16,

@@ -46,16 +46,16 @@ def test_gemm_sweep():
     # model_config = TinyMixtral()
     model_config = Mixtral8x7b()
 
-    tile_Ns = [64, 16]  # For the batch dim (64)
+    tile_Ns = [1024, 256]  # For the batch dim (64)
     tile_Fs = [64]  # For the model_config.moe_inter_dim
 
     # ------------ Expert Indices ------------
-    iter = 8
-    layer = 10
-    expert_selection_file = f"/home/ginasohn/expert_routing/processed_mixtral/expr_per_layer/iter_{iter:03d}_layer_{layer:03d}.npz"
+    batch = 1024  # 256, 512, 1024
+    layer = 24  # 0 (even), 24 (middle), 30 (uneven)
+    expert_selection_file = f"/home/ginasohn/expert_routing/processed_qwen/expr_large_b/token1_layer{layer}_b{batch}.npz"
     expert_indices_npz = np.load(expert_selection_file)
     expert_indices = torch.from_numpy(
-        expert_indices_npz["data"]
+        expert_indices_npz["arr_0"]
     )  # [B, n_activated_experts]
 
     # expert_counts: [n_routed_experts] (bincount across all batches)
@@ -155,9 +155,10 @@ def test_gemm_sweep():
             results.append(dict_to_append)
 
             out_file = (
-                f"/home/ginasohn/step_tl/dyn_tiling/mixtral_{model_config.dim}_"
-                + f"{model_config.moe_inter_dim}_iter{iter:03d}_layer_{layer:03d}_"
-                + f"n{tile_N}_f{tile_F}_{time.strftime("%d%H%M%S")}.csv"
+                f"/home/ginasohn/step_tl/dyn_tiling/"
+                + f"mixtral_b{batch}_{model_config.dim}_{model_config.moe_inter_dim}_"
+                + f"layer_{layer:03d}_n{tile_N}_f{tile_F}_"
+                + f"{time.strftime("%d%H%M%S")}.csv"
             )
             try:
                 with open(out_file, "w", newline="", encoding="utf-8") as csvfile:
@@ -197,12 +198,12 @@ def test_gemm_dyn_tile():
     tile_Fs = [64]  # For the model_config.moe_inter_dim
 
     # ------------ Expert Indices ------------
-    iter = 8
-    layer = 10
-    expert_selection_file = f"/home/ginasohn/expert_routing/processed_mixtral/expr_per_layer/iter_{iter:03d}_layer_{layer:03d}.npz"
+    batch = 1024  # 256, 512, 1024
+    layer = 24  # 0 (even), 24 (middle), 30 (uneven)
+    expert_selection_file = f"/home/ginasohn/expert_routing/processed_qwen/expr_large_b/token1_layer{layer}_b{batch}.npz"
     expert_indices_npz = np.load(expert_selection_file)
     expert_indices = torch.from_numpy(
-        expert_indices_npz["data"]
+        expert_indices_npz["arr_0"]
     )  # [B, n_activated_experts]
 
     # expert_counts: [n_routed_experts] (bincount across all batches)
@@ -223,18 +224,22 @@ def test_gemm_dyn_tile():
     for tile_F in tile_Fs:
         results = []
 
-        off_chip_traffic, on_chip_requirement, cycles, duration_s = (
-            run_ws_tile_mn_mk_dyn_tile(
-                round_N,
-                tile_F,
-                input_tensor,
-                expert_indices,
-                model_config,
-                "timing",  # "full",
-                False,
-                mock_bf16,
-                # logging=f"expert_par_gemm_dyn_tile_round_{round_N}_f{tile_F}",
-            )
+        (
+            off_chip_traffic,
+            on_chip_requirement,
+            cycles,
+            duration_s,
+            unit_expert_on_chip,
+        ) = run_ws_tile_mn_mk_dyn_tile(
+            round_N,
+            tile_F,
+            input_tensor,
+            expert_indices,
+            model_config,
+            "timing",  # "full",
+            False,
+            mock_bf16,
+            # logging=f"expert_par_gemm_dyn_tile_round_{round_N}_f{tile_F}",
         )
 
         # ------------ substitue symbols in the off_chip_traffic and on_chip_requirement ------------
@@ -274,7 +279,6 @@ def test_gemm_dyn_tile():
                 for b in padded_rows
             ]
         )
-
         # --------------- off-chip traffic ---------------
         free_symbols = sorted(off_chip_traffic.free_symbols, key=str)
 
@@ -286,6 +290,7 @@ def test_gemm_dyn_tile():
         off_chip_traffic_val = off_chip_traffic.subs(sub_dict)
 
         # --------------- On-chip requirement ---------------
+
         free_symbols = sorted(on_chip_requirement.free_symbols, key=str)
 
         sub_dict = {
@@ -293,6 +298,12 @@ def test_gemm_dyn_tile():
         }
 
         on_chip_requirement_val = on_chip_requirement.subs(sub_dict)
+        print(f"on_chip_requirement_val: {on_chip_requirement_val}")
+        on_chip_requirement_val = (
+            on_chip_requirement_val
+            - expert_counts.tolist().count(0) * unit_expert_on_chip
+        )
+        # subtract the on-chip requirement for unselected experts weight load assuming on-chip memory is allocated on-demand
 
         dict_to_append = {
             "batch": B,
@@ -309,8 +320,9 @@ def test_gemm_dyn_tile():
         results.append(dict_to_append)
 
         out_file = (
-            f"/home/ginasohn/step_tl/dyn_tiling/mixtral_{model_config.dim}_"
-            + f"{model_config.moe_inter_dim}_round_{round_N}_iter{iter:03d}_layer_{layer:03d}_"
+            f"/home/ginasohn/step_tl/dyn_tiling/"
+            + f"mixtral_b{batch}_{model_config.dim}_{model_config.moe_inter_dim}_"
+            + f"round_{round_N}_layer_{layer:03d}_"
             + f"n_dyn_f{tile_F}_{time.strftime("%d%H%M%S")}.csv"
         )
         try:
