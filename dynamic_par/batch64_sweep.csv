@@ -1,0 +1,4 @@
+batch,unit_flops,max_N,tile_N,stdev,start_idx,end_idx,static_coarse_cycles,static_interleave_cycles,dynamic_cycles
+64,2048,6464,32,508,2019,2082,56188,54448,46770
+64,2048,6464,32,484,4185,4248,48710,48789,42624
+64,2048,6464,32,477,271,334,43392,50172,39962

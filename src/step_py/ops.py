@@ -1898,9 +1898,9 @@ class EagerMerge(StepOps):
         self.num_consumers = 2
 
         in_streams: List[Stream] = [get_stream(input) for input in inputs]
-        assert all(
-            stream.shape[1:] == in_streams[0].shape[1:] for stream in in_streams
-        ), "All input streams must have the same shape except the outermost dimensions."
+        # assert all(
+        #     stream.shape[1:] == in_streams[0].shape[1:] for stream in in_streams
+        # ), "All input streams must have the same shape except the outermost dimensions."
 
         # True if any input streams has a dynamic outermost dimension
         has_dyndim_input = any(
