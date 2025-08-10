@@ -862,8 +862,8 @@ def test_timeshare_mn_mk_gemm_reshape():
     model_config = Qwen30b()
 
     n_par_region_list = [64, 32, 16, 8, 4, 2]
-    tile_Ns = [64, 16]  # For the batch dim (64)
-    tile_Fs = [64]  # For the model_config.moe_inter_dim
+    tile_Ns = [32]  # For the batch dim (64)
+    tile_Fs = [48]  # For the model_config.moe_inter_dim
 
     base_flops = 1024  # unit flop for 128 case (no time sharing)
     flops_for_weighted_sum = 1024  # fixed among sweep
@@ -1049,8 +1049,8 @@ def test_baseline_for_membound_timeshare():
     # model_config = TinyQwen30b()
     model_config = Qwen30b()
 
-    tile_Ns = [64, 16]  # For the batch dim (64)
-    tile_Fs = [64]  # For the model_config.moe_inter_dim
+    tile_Ns = [32]  # For the batch dim (64)
+    tile_Fs = [48]  # For the model_config.moe_inter_dim
 
     base_flops = 1024  # unit flop for 128 case (no time sharing)
     flops_for_weighted_sum = 1024  # fixed among sweep

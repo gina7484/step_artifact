@@ -41,7 +41,7 @@ def timeshare_mn_mk_gemm_reshape_fixed_fanout_dyn_tile(
     w_gate_list: torch.Tensor,
     w_up_list: torch.Tensor,
     w_down_list: torch.Tensor,
-    tile_N: int,  # M
+    round_N: int,  # M
     tile_F: int,  # Gate & Up (K), Down (N)
     n_par_region: int,
     mock_bf16: bool,
@@ -129,19 +129,22 @@ def timeshare_mn_mk_gemm_reshape_fixed_fanout_dyn_tile(
 
     # - input stream shape: [Dyn] x n_routed_experts (tile: [1, D])
     # - output stream:
-    #   - After Reshape: [dyn_1, (Dyn + tile_N -1) // tile_N, tile_N] x n_routed_experts (tile: [1, D])
-    #   - After Flatten: [(Dyn + tile_N -1) // tile_N, tile_N] x n_routed_experts (tile: [1, D])
-    #   - After Accum:   [(Dyn + tile_N -1) // tile_N]         x n_routed_experts (tile: [tile_N, D])
-
-    reshaped_expert_feature_streams = [
-        Reshape(
+    #   - after reshape: [dyn_1, ((Dyn + round_N -1) // round_N),  round_N] x n_routed_experts (tile: [1, D])
+    #   - after flatten: [dyn_1, ((Dyn + round_N -1) // round_N) * round_N] x n_routed_experts (tile: [1, D])
+    round_to_16 = [
+        Flatten(
             step_graph,
-            (unchunked_expert_feature_streams, i),
-            tile_N,
-            0,
-            write_back_mu=False,
-            add_outer_dim=True,
-            pad_fn=init_fn.Zero(shape=(1, D), dtype=Float32()),
+            Reshape(
+                step_graph,
+                (unchunked_expert_feature_streams, i),
+                round_N,
+                0,
+                write_back_mu=False,
+                add_outer_dim=True,
+                pad_fn=init_fn.Zero(shape=(1, D), dtype=Float32()),
+            ),
+            min_rank=0,
+            max_rank=1,
         )
         for i in range(model_config.n_routed_experts)
     ]
@@ -149,32 +152,30 @@ def timeshare_mn_mk_gemm_reshape_fixed_fanout_dyn_tile(
     # In this case, we don't need to specify the outermost 1 is a dynamic dim
     # as it gets flattened with the dyn dim
 
+    # - input stream shape: [dyn_1, ((Dyn + round_N -1) // round_N) * round_N] x n_routed_experts (tile: [1, D])
+    # - output stream: [dyn_1] x n_routed_experts (tile: [((Dyn + round_N -1) // round_N) * round_N, D])
+
     expert_feature_streams = [
         Accum(
             step_graph,
-            Flatten(
-                step_graph,
-                reshaped_expert_feature_streams[i],
-                min_rank=1,
-                max_rank=2,
-            ),
-            Tile(tile_dtype=Float32(), shape=(tile_N, D)),  # output type
+            stream_i,
+            DynTile(
+                tile_dtype=Float32(), shape=(stream_i.stream.shape[1], D)
+            ),  # output type
             accum_fn.RetileRow(),
             init_fn.Empty(shape=(0, D), dtype=Float32()),
             1,
             False,
-            accum_compute_bw,
+            1024,
         )
-        for i in range(model_config.n_routed_experts)
-    ]  # [dyn_1 * (Dyn + tile_N -1) // tile_N] of tile_N x D
-
-    per_expert_accum_unit_on_chip += expert_feature_streams[0].on_chip_requirement()
+        for stream_i in round_to_16
+    ]
 
     # ------------ Stage 5: Reroute input features ------------
     # 5.1: Merge the input features
-    # - input stream shape:         [(Dyn + tile_N -1) // tile_N] x n_routed_experts (tile: [tile_N, D])
-    # - output stream shape: (data) [Σ((Dyn + tile_N -1) // tile_N)] x n_par_region (tile: [tile_N, D])
-    #                        (sel)  [Σ((Dyn + tile_N -1) // tile_N)] x n_par_region (dtype: Multihot)
+    # - input stream shape:   [dyn_1] x n_routed_experts (tile: [Dyn, D])
+    # - output stream shape: (data) [Σdyn_1] x n_par_region (tile: [Dyn, D])
+    #                        (sel)  [Σdyn_1] x n_par_region (dtype: Multihot)
     merged_feature_streams = [
         EagerMerge(
             step_graph,
@@ -185,8 +186,8 @@ def timeshare_mn_mk_gemm_reshape_fixed_fanout_dyn_tile(
     ]
 
     # 5.2: Repeat the input features
-    # - input stream shape:   [Σ((Dyn + tile_N -1) // tile_N)]              x n_par_region (tile: [tile_N, D])
-    # - output stream shape:  [Σ((Dyn + tile_N -1) // tile_N), F // tile_F] x n_par_region (tile: [tile_N, D])
+    # - input stream shape:   [Σdyn_1]              x n_par_region (tile: [Dyn', D])
+    # - output stream shape:  [Σdyn_1, F // tile_F] x n_par_region (tile: [Dyn', D])
     repeated_feature_streams = [
         RepeatStatic(
             graph=step_graph,
@@ -196,11 +197,9 @@ def timeshare_mn_mk_gemm_reshape_fixed_fanout_dyn_tile(
         for i in range(n_par_region)
     ]
 
-    expert_region_unit_on_chip += repeated_feature_streams[0].on_chip_requirement()
-
     # 5.3: Generate addresses for expert loading
-    # - input stream shape:   [Σ((Dyn + tile_N -1) // tile_N)]                 x n_par_region (dtype: Multihot)
-    # - output stream shape:  [Σ((Dyn + tile_N -1) // tile_N), F // tile_F, 1] x n_par_region (dtype: u64)
+    # - input stream shape:   [Σdyn_1]                 x n_par_region (dtype: Multihot)
+    # - output stream shape:  [Σdyn_1, F // tile_F, 1] x n_par_region (dtype: u64)
     expert_addr_gen = [
         ExpertAddrGen(
             graph=step_graph,
@@ -213,8 +212,8 @@ def timeshare_mn_mk_gemm_reshape_fixed_fanout_dyn_tile(
 
     # ------------ Stage 6: Load up parameters ------------
     # - tensor shape: [D, F]
-    # - raddr stream shape:  [Σ((Dyn + tile_N -1) // tile_N), F // tile_F, 1]
-    # - output stream shape: [Σ((Dyn + tile_N -1) // tile_N), F // tile_F, 1] (tile: [D, tile_F])
+    # - raddr stream shape:  [Σdyn_1, F // tile_F, 1]
+    # - output stream shape: [Σdyn_1, F // tile_F, 1] (tile: [D, tile_F])
     up_loads = [
         RandomOffChipLoad(
             graph=step_graph,
@@ -231,8 +230,8 @@ def timeshare_mn_mk_gemm_reshape_fixed_fanout_dyn_tile(
 
     expert_region_unit_on_chip += up_loads[0].on_chip_requirement()
 
-    # - input stream shape:   [Σ((Dyn + tile_N -1) // tile_N), F // tile_F, 1] (tile: [D, tile_F])
-    # - output stream shape:  [Σ((Dyn + tile_N -1) // tile_N), F // tile_F]    (tile: [D, tile_F])
+    # - input stream shape:   [Σdyn_1, F // tile_F, 1] (tile: [D, tile_F])
+    # - output stream shape:  [Σdyn_1, F // tile_F]    (tile: [D, tile_F])
     ready_up_loads = [
         Flatten(
             graph=step_graph,
@@ -244,15 +243,15 @@ def timeshare_mn_mk_gemm_reshape_fixed_fanout_dyn_tile(
     ]
 
     # ------------ Stage 7: Compute the up features ------------
-    # - input stream shape:   [Σ((Dyn + tile_N -1) // tile_N), F // tile_F] (tile: [tile_N, D])
-    # - weight stream shape:  [Σ((Dyn + tile_N -1) // tile_N), F // tile_F] (tile: [D, tile_F])
-    # - output stream shape:  [Σ((Dyn + tile_N -1) // tile_N), F // tile_F] (tile: [tile_N, tile_F])
+    # - input stream shape:   [Σdyn_1, F // tile_F] (tile: [Dyn', D])
+    # - weight stream shape:  [Σdyn_1, F // tile_F] (tile: [D, tile_F])
+    # - output stream shape:  [Σdyn_1, F // tile_F] (tile: [Dyn', tile_F])
     up_feature_streams = [
         BinaryMap(
             step_graph,
             feature,
             weight,
-            map_fn.Matmul(weight_transposed=False),
+            map_fn.DynMatmul(weight_transposed=False),
             False,
             up_compute_bw,
         )
@@ -262,8 +261,8 @@ def timeshare_mn_mk_gemm_reshape_fixed_fanout_dyn_tile(
 
     # ------------ Stage 8: Load gate parameters ------------
     # - tensor shape: [D, F]
-    # - raddr stream shape:  [Σ((Dyn + tile_N -1) // tile_N), F // tile_F, 1]
-    # - output stream shape: [Σ((Dyn + tile_N -1) // tile_N), F // tile_F, 1] (tile: [D, tile_F])
+    # - raddr stream shape:  [Σdyn_1, F // tile_F, 1]
+    # - output stream shape: [Σdyn_1, F // tile_F, 1] (tile: [D, tile_F])
     gate_loads = [
         RandomOffChipLoad(
             graph=step_graph,
@@ -279,8 +278,8 @@ def timeshare_mn_mk_gemm_reshape_fixed_fanout_dyn_tile(
     ]
     expert_region_unit_on_chip += gate_loads[0].on_chip_requirement()
 
-    # - input stream shape:   [Σ((Dyn + tile_N -1) // tile_N), F // tile_F, 1] (tile: [D, tile_F])
-    # - output stream shape:  [Σ((Dyn + tile_N -1) // tile_N), F // tile_F]    (tile: [D, tile_F])
+    # - input stream shape:   [Σdyn_1, F // tile_F, 1] (tile: [D, tile_F])
+    # - output stream shape:  [Σdyn_1, F // tile_F]    (tile: [D, tile_F])
     ready_gate_loads = [
         Flatten(
             graph=step_graph,
@@ -292,15 +291,15 @@ def timeshare_mn_mk_gemm_reshape_fixed_fanout_dyn_tile(
     ]
 
     # ------------ Stage 8: Compute the gate features ------------
-    # - input stream shape:   [Σ((Dyn + tile_N -1) // tile_N), F // tile_F] (tile: [tile_N, D])
-    # - weight stream shape:  [Σ((Dyn + tile_N -1) // tile_N), F // tile_F] (tile: [D, tile_F])
-    # - output stream shape:  [Σ((Dyn + tile_N -1) // tile_N), F // tile_F] (tile: [tile_N, tile_F])
+    # - input stream shape:   [Σdyn_1, F // tile_F] (tile: [Dyn', D])
+    # - weight stream shape:  [Σdyn_1, F // tile_F] (tile: [D, tile_F])
+    # - output stream shape:  [Σdyn_1, F // tile_F] (tile: [Dyn', tile_F])
     pre_act_gate_feature_streams = [
         BinaryMap(
             step_graph,
             feature,
             weight,
-            map_fn.Matmul(weight_transposed=False),
+            map_fn.DynMatmul(weight_transposed=False),
             False,
             gate_compute_bw,
         )
@@ -309,8 +308,8 @@ def timeshare_mn_mk_gemm_reshape_fixed_fanout_dyn_tile(
     allocated_comp_flops += gate_compute_bw * len(pre_act_gate_feature_streams)
 
     # ------------ Stage 9: Compute the activation ------------
-    # - input stream shape:   [Σ((Dyn + tile_N -1) // tile_N), F // tile_F] (tile: [tile_N, tile_F])
-    # - output stream shape:  [Σ((Dyn + tile_N -1) // tile_N), F // tile_F] (tile: [tile_N, tile_F])
+    # - input stream shape:   [Σdyn_1, F // tile_F] (tile: [Dyn', tile_F])
+    # - output stream shape:  [Σdyn_1, F // tile_F] (tile: [Dyn', tile_F])
     gate_feature_streams = [
         UnaryMap(
             graph=step_graph,
@@ -324,9 +323,9 @@ def timeshare_mn_mk_gemm_reshape_fixed_fanout_dyn_tile(
     allocated_comp_flops += act_fn_compute_bw * len(gate_feature_streams)
 
     # ------------ Stage 10: Compute the projected features ------------
-    # - input1 stream shape:   [Σ((Dyn + tile_N -1) // tile_N), F // tile_F] (tile: [tile_N, tile_F])
-    # - input2 stream shape:   [Σ((Dyn + tile_N -1) // tile_N), F // tile_F] (tile: [tile_N, tile_F])
-    # - output stream shape:   [Σ((Dyn + tile_N -1) // tile_N), F // tile_F] (tile: [tile_N, tile_F])
+    # - input1 stream shape:   [Σdyn_1, F // tile_F] (tile: [Dyn', tile_F])
+    # - input2 stream shape:   [Σdyn_1, F // tile_F] (tile: [Dyn', tile_F])
+    # - output stream shape:   [Σdyn_1, F // tile_F] (tile: [Dyn', tile_F])
     projected_feature_streams = [
         BinaryMap(
             step_graph, up_feature, gate_feature, map_fn.Mul(), False, mult_compute_bw
@@ -337,8 +336,8 @@ def timeshare_mn_mk_gemm_reshape_fixed_fanout_dyn_tile(
 
     # ------------ Stage 11: Load down parameters ------------
     # - tensor shape: [F, D]
-    # - raddr stream shape:  [Σ((Dyn + tile_N -1) // tile_N), F // tile_F, 1]
-    # - output stream shape: [Σ((Dyn + tile_N -1) // tile_N), F // tile_F, 1] (tile: [tile_F, D])
+    # - raddr stream shape:  [Σdyn_1, F // tile_F, 1]
+    # - output stream shape: [Σdyn_1, F // tile_F, 1] (tile: [tile_F, D])
     down_loads = [
         RandomOffChipLoad(
             graph=step_graph,
@@ -355,8 +354,8 @@ def timeshare_mn_mk_gemm_reshape_fixed_fanout_dyn_tile(
 
     expert_region_unit_on_chip += down_loads[0].on_chip_requirement()
 
-    # - input stream shape:   [Σ((Dyn + tile_N -1) // tile_N), F // tile_F, 1] (tile: [tile_F, D])
-    # - output stream shape:  [Σ((Dyn + tile_N -1) // tile_N), F // tile_F] (tile: [tile_F, D])
+    # - input stream shape:   [Σdyn_1, F // tile_F, 1] (tile: [tile_F, D])
+    # - output stream shape:  [Σdyn_1, F // tile_F] (tile: [tile_F, D])
     ready_down_loads = [
         Flatten(
             graph=step_graph,
@@ -368,16 +367,16 @@ def timeshare_mn_mk_gemm_reshape_fixed_fanout_dyn_tile(
     ]
 
     # ------------ Stage 12: Compute the down features ------------
-    # - input stream shape:   [Σ((Dyn + tile_N -1) // tile_N), F // tile_F] (tile: [tile_N, tile_F])
-    # - weight stream shape:  [Σ((Dyn + tile_N -1) // tile_N), F // tile_F] (tile: [tile_F, D])
-    # - output stream shape:  [Σ((Dyn + tile_N -1) // tile_N)]              (tile: [tile_N, D])
+    # - input stream shape:   [Σdyn_1, F // tile_F] (tile: [Dyn', tile_F])
+    # - weight stream shape:  [Σdyn_1, F // tile_F] (tile: [tile_F, D])
+    # - output stream shape:  [Σdyn_1]              (tile: [Dyn', D])
     chunked_down_feature_streams = [
         BinaryMapAccum(
             step_graph,
             feature,
             weight,
-            map_accum_fn.Matmul(weight_transposed=False),
-            init_fn.Zero(shape=(tile_N, D), dtype=Float32()),
+            map_accum_fn.DynMatmul(weight_transposed=False),
+            init_fn.Empty(shape=(0, D), dtype=Float32()),
             1,
             False,
             down_compute_bw,
@@ -385,12 +384,12 @@ def timeshare_mn_mk_gemm_reshape_fixed_fanout_dyn_tile(
         for feature, weight in zip(projected_feature_streams, ready_down_loads)
     ]
     allocated_comp_flops += down_compute_bw * len(chunked_down_feature_streams)
-    expert_region_unit_on_chip += chunked_down_feature_streams[0].on_chip_requirement()
+    # expert_region_unit_on_chip += chunked_down_feature_streams[0].on_chip_requirement()
 
     # ------------ Additional Stage for Redistributing the experts -----------
-    # - output stream shape:  [Σ((Dyn + tile_N -1) // tile_N)] x n_par_region (tile: [tile_N, D])
-    # - control stream shape: [Σ((Dyn + tile_N -1) // tile_N)] x n_par_region (dtype: Multihot)
-    # - output stream shape:  [  (Dyn + tile_N -1) // tile_N ] x n_routed_experts (tile: [tile_N, D])
+    # - output stream shape:  [Σdyn_1] x n_par_region (tile: [Dyn', D])
+    # - control stream shape: [Σdyn_1] x n_par_region (dtype: Multihot)
+    # - output stream shape:  [dyn_1] x n_routed_experts (tile: [Dyn', D])
     per_expert_results = [
         FlatPartition(
             graph=step_graph,
@@ -404,9 +403,22 @@ def timeshare_mn_mk_gemm_reshape_fixed_fanout_dyn_tile(
         for i in range(n_par_region)
     ]
 
+    for region_i in range(n_par_region):
+        for expert_i in range(expert_per_region):
+            per_expert_results[region_i].stream_idx(expert_i).stream_dtype = (
+                expert_feature_streams[
+                    region_i * expert_per_region + expert_i
+                ].stream.stream_dtype
+            )
+            per_expert_results[region_i].stream_idx(expert_i).shape = (
+                expert_feature_streams[
+                    region_i * expert_per_region + expert_i
+                ].stream.shape
+            )
+
     # ------------ Stage 12.5: Partition & Retile outputs for each expert ------------
-    # - input stream shape:  [(Dyn + tile_N -1) // tile_N] (tile: [tile_N, D])
-    # - output stream shape: [Dyn_retile]                  (tile: [1, D])
+    # - input stream shape:  [dyn_1] (tile: [Dyn, D])
+    # - output stream shape: [dyn_1] (tile: [1, D])
     down_feature_streams = [
         RetileStreamify(
             graph=step_graph,
@@ -508,7 +520,7 @@ def timeshare_mn_mk_gemm_reshape_fixed_fanout_dyn_tile(
     )
 
 
-def call_timeshare_mn_mk_gemm_reshape_fixed_fanout_revet(
+def call_timeshare_mn_mk_gemm_reshape_fixed_fanout_dyn_tile(
     model_config,
     batch: int,
     gate_compute_bw: int,
@@ -525,7 +537,7 @@ def call_timeshare_mn_mk_gemm_reshape_fixed_fanout_revet(
     w_gate_list: torch.Tensor,
     w_up_list: torch.Tensor,
     w_down_list: torch.Tensor,
-    tile_N: int,
+    round_N: int,
     tile_F: int,
     n_par_region: int,
     save_graph: bool,
@@ -552,7 +564,7 @@ def call_timeshare_mn_mk_gemm_reshape_fixed_fanout_revet(
         per_expert_accum_unit_on_chip,
         expert_region_unit_on_chip,
         allocated_comp_flops,
-    ) = timeshare_mn_mk_gemm_reshape_fixed_fanout_revet(
+    ) = timeshare_mn_mk_gemm_reshape_fixed_fanout_dyn_tile(
         step_graph=step_graph,
         model_config=model_config,
         batch=batch,
@@ -570,7 +582,7 @@ def call_timeshare_mn_mk_gemm_reshape_fixed_fanout_revet(
         w_gate_list=w_gate_list,
         w_up_list=w_up_list,
         w_down_list=w_down_list,
-        tile_N=tile_N,
+        round_N=round_N,
         tile_F=tile_F,
         n_par_region=n_par_region,
         mock_bf16=mock_bf16,
@@ -592,21 +604,21 @@ def call_timeshare_mn_mk_gemm_reshape_fixed_fanout_revet(
     total_on_chip_requirement = sympy.Integer(0)
 
     # off_chip_traffic_list = {}
-    for node_tuple in step_graph.nodes(data=True):
-        node, data = node_tuple
-        if isinstance(node, StepOps):
-            # if node.off_chip_traffic() != 0:
-            #     off_chip_traffic_list[
-            #         f"{node.__class__.__name__}_{node.instance_id}"
-            #     ] = node.off_chip_traffic()
-            total_off_chip_traffic = sympy.Add(
-                total_off_chip_traffic, node.off_chip_traffic()
-            )
-            total_on_chip_requirement = sympy.Add(
-                total_on_chip_requirement, node.on_chip_requirement()
-            )
-        else:
-            raise ValueError(f"Node {node} in the graph is not a StepOps")
+    # for node_tuple in step_graph.nodes(data=True):
+    #     node, data = node_tuple
+    #     if isinstance(node, StepOps):
+    #         # if node.off_chip_traffic() != 0:
+    #         #     off_chip_traffic_list[
+    #         #         f"{node.__class__.__name__}_{node.instance_id}"
+    #         #     ] = node.off_chip_traffic()
+    #         total_off_chip_traffic = sympy.Add(
+    #             total_off_chip_traffic, node.off_chip_traffic()
+    #         )
+    #         total_on_chip_requirement = sympy.Add(
+    #             total_on_chip_requirement, node.on_chip_requirement()
+    #         )
+    #     else:
+    #         raise ValueError(f"Node {node} in the graph is not a StepOps")
 
     # for key, value in sorted(off_chip_traffic_list.items()):
     #     print(f"{key}: {value}")
@@ -653,8 +665,8 @@ def call_timeshare_mn_mk_gemm_reshape_fixed_fanout_revet(
     )
 
 
-def run_timeshare_mn_mk_gemm_reshape_fixed_fanout_revet(
-    tile_N: int,  # M (The number of requests to chunk for the GEMM in each expert)
+def run_timeshare_mn_mk_gemm_reshape_fixed_fanout_dyn_tile(
+    round_N: int,  # M (The number of requests to chunk for the GEMM in each expert)
     tile_F: int,  # K (The tile size used for the model_config.dim dimension)
     input_tensor,
     expert_indices,
@@ -759,7 +771,7 @@ def run_timeshare_mn_mk_gemm_reshape_fixed_fanout_revet(
         per_expert_accum_unit_on_chip,
         expert_region_unit_on_chip,
         allocated_comp_flops,
-    ) = call_timeshare_mn_mk_gemm_reshape_fixed_fanout_revet(  # type: ignore (Cannot infer type of output properly)
+    ) = call_timeshare_mn_mk_gemm_reshape_fixed_fanout_dyn_tile(  # type: ignore (Cannot infer type of output properly)
         model_config=model_config,
         batch=B,
         gate_compute_bw=GATE_COMPUTE_BW,
@@ -791,7 +803,7 @@ def run_timeshare_mn_mk_gemm_reshape_fixed_fanout_revet(
             )
             for i in range(n_par_region)
         ],
-        tile_N=tile_N,
+        round_N=round_N,
         tile_F=tile_F,
         n_par_region=n_par_region,
         save_graph=save_graph,
@@ -858,7 +870,7 @@ class TinyQwen30b:  # 32x scaled down version for each dimension
     moe_inter_dim = 24  # 768 // 32
 
 
-def test_timeshare_mn_mk_gemm_reshape():
+def test_timeshare_mn_mk_gemm_reshape_dyn_tile():
     mock_bf16 = True
     par_dispatch = 1
     # ------------ Model Configuration ------------
@@ -867,8 +879,8 @@ def test_timeshare_mn_mk_gemm_reshape():
     model_config = Qwen30b()
 
     n_par_region_list = [64, 32, 16, 8, 4, 2]
-    tile_Ns = [64, 16]  # For the batch dim (64)
-    tile_Fs = [64]  # For the model_config.moe_inter_dim
+    round_N = 1
+    tile_Fs = [48]  # For the model_config.moe_inter_dim
 
     base_flops = 1024  # unit flop for 128 case (no time sharing)
     flops_for_weighted_sum = 1024  # fixed among sweep
@@ -900,120 +912,124 @@ def test_timeshare_mn_mk_gemm_reshape():
     results = []
     for n_par_region in n_par_region_list:
         unit_flops = base_flops
-        for tile_N in tile_Ns:
-            for tile_F in tile_Fs:
+        for tile_F in tile_Fs:
 
-                (
-                    off_chip_traffic,
-                    on_chip_requirement,
-                    cycles,
-                    duration_s,
-                    per_expert_accum_unit_on_chip,
-                    expert_region_unit_on_chip,
-                    allocated_comp_flops,
-                ) = run_timeshare_mn_mk_gemm_reshape_fixed_fanout_revet(
-                    tile_N=tile_N,
-                    tile_F=tile_F,
-                    input_tensor=input_tensor,
-                    expert_indices=expert_indices,
-                    model_config=model_config,
-                    simulate_rust="timing",
-                    gold_check=False,
-                    save_graph=False,
-                    n_par_region=n_par_region,
-                    flops=unit_flops,
-                    flops_for_weighted_sum=flops_for_weighted_sum,
-                    par_dispatch=par_dispatch,
-                    mock_bf16=mock_bf16,
-                    # logging=f"expert_par_gemm_n{tile_N}_f{tile_F}",
-                )
+            (
+                off_chip_traffic,
+                on_chip_requirement,
+                cycles,
+                duration_s,
+                per_expert_accum_unit_on_chip,
+                expert_region_unit_on_chip,
+                allocated_comp_flops,
+            ) = run_timeshare_mn_mk_gemm_reshape_fixed_fanout_dyn_tile(
+                round_N=round_N,
+                tile_F=tile_F,
+                input_tensor=input_tensor,
+                expert_indices=expert_indices,
+                model_config=model_config,
+                simulate_rust="timing",
+                gold_check=False,
+                save_graph=False,
+                n_par_region=n_par_region,
+                flops=unit_flops,
+                flops_for_weighted_sum=flops_for_weighted_sum,
+                par_dispatch=par_dispatch,
+                mock_bf16=mock_bf16,
+                # logging=f"expert_par_gemm_n{tile_N}_f{tile_F}",
+            )
 
-                # ------------ Total FLOPs ------------------
-                num_tiles = [
-                    (routed_toks + tile_N - 1) // tile_N
-                    for routed_toks in expert_counts.tolist()
+            # ------------ Total FLOPs ------------------
+            num_tiles = [
+                (routed_toks + round_N - 1) // round_N
+                for routed_toks in expert_counts.tolist()
+            ]
+            after_pad_batch_dim = [num_tiles_i * round_N for num_tiles_i in num_tiles]
+            alg_flops = sum(
+                [
+                    (
+                        2 * b * model_config.dim * model_config.moe_inter_dim * 3
+                    )  # 3 (Linear layers)
+                    + b * model_config.moe_inter_dim  # 1 (Element-wise mult)
+                    + (
+                        8 * b * model_config.dim * model_config.moe_inter_dim
+                    )  # silu_flops: 1(neg)+4(exp)+1(add)+1(div)+1(mul)= 8 FLOPs per element
+                    for b in after_pad_batch_dim
                 ]
-                after_pad_batch_dim = [
-                    num_tiles_i * tile_N for num_tiles_i in num_tiles
-                ]
-                alg_flops = sum(
-                    [
-                        (
-                            2 * b * model_config.dim * model_config.moe_inter_dim * 3
-                        )  # 3 (Linear layers)
-                        + b * model_config.moe_inter_dim  # 1 (Element-wise mult)
-                        + (
-                            8 * b * model_config.dim * model_config.moe_inter_dim
-                        )  # silu_flops: 1(neg)+4(exp)+1(add)+1(div)+1(mul)= 8 FLOPs per element
-                        for b in after_pad_batch_dim
-                    ]
-                )
+            )
 
-                # ------------ substitue symbols in the off_chip_traffic and on_chip_requirement ------------
-                free_symbols = sorted(off_chip_traffic.free_symbols, key=str)
+            # # ------------ substitue symbols in the off_chip_traffic and on_chip_requirement ------------
+            # free_symbols = sorted(off_chip_traffic.free_symbols, key=str)
 
-                sub_dict = {
-                    symbol: value
-                    for symbol, value in zip(free_symbols, expert_counts.tolist())
-                }
-                # print(f"off_chip_traffic: {off_chip_traffic}")
+            # sub_dict = {
+            #     symbol: value
+            #     for symbol, value in zip(free_symbols, expert_counts.tolist())
+            # }
+            # # print(f"off_chip_traffic: {off_chip_traffic}")
 
-                off_chip_traffic_val = off_chip_traffic.subs(sub_dict)
+            # off_chip_traffic_val = off_chip_traffic.subs(sub_dict)
 
-                # --------------- On-chip requirement ---------------
-                on_chip_requirement_val = (
-                    on_chip_requirement
-                    - expert_counts.tolist().count(0) * per_expert_accum_unit_on_chip
-                )
-                # subtract the on-chip requirement for unselected experts
-                token_per_region = []
+            # # --------------- On-chip requirement ---------------
+            # free_symbols = sorted(on_chip_requirement.free_symbols, key=str)
+            # # print(f"on_chip_traffic free_symbols: {free_symbols}")
 
-                # Iterate through the list in steps of n
-                for i in range(0, len(expert_counts.tolist()), 128 // n_par_region):
-                    # Sum the next n elements (or remaining elements if less than n)
-                    chunk_sum = sum(expert_counts.tolist()[i : i + 128 // n_par_region])
-                    token_per_region.append(chunk_sum)
+            # sub_dict = {
+            #     symbol: value
+            #     for symbol, value in zip(free_symbols, expert_counts.tolist())
+            # }
+            # # print(f"on_chip_traffic: {on_chip_requirement}")
+            # # print(f"on_chip_traffic sub_dict: {sub_dict}")
 
-                print(f"Unselected region: {token_per_region.count(0)}")
-                on_chip_requirement_val = (
-                    on_chip_requirement_val
-                    - token_per_region.count(0) * expert_region_unit_on_chip
-                )
+            # on_chip_requirement_val = on_chip_requirement.subs(sub_dict)
 
-                # ------------ Print the results ------------
-                print(f"Off-chip traffic (KB): {round(off_chip_traffic_val / 1024, 2)}")
-                print(
-                    f"On-chip requirement (KB): {round(on_chip_requirement_val / 1024, 2)}"
-                )
-                print(f"Cycles: {cycles}")
-                print(f"Duration: {duration_s} s")
+            # subtract the on-chip requirement for unselected experts
+            token_per_region = []
 
-                dict_to_append = {
-                    "batch": B,
-                    "n_par_region": n_par_region,
-                    "n_expert_per_region": model_config.n_routed_experts
-                    // n_par_region,
-                    "unit_flops": unit_flops,
-                    "tile_N": tile_N,
-                    "tile_F": tile_F,
-                    "flops": alg_flops,  # FLOP of the algorithm itself
-                    "cycles": cycles,
-                    "duration_s": duration_s,
-                    "off_chip_traffic_bytes": off_chip_traffic_val,
-                    "on_chip_requirement_bytes": on_chip_requirement_val,
-                    "allocated_flops": allocated_comp_flops,
-                    "utilization(%)": round(
-                        (alg_flops / cycles) / allocated_comp_flops * 100, 2
-                    ),
-                }
-                print(dict_to_append)
-                results.append(dict_to_append)
+            # Iterate through the list in steps of n
+            for i in range(0, len(expert_counts.tolist()), 128 // n_par_region):
+                # Sum the next n elements (or remaining elements if less than n)
+                chunk_sum = sum(expert_counts.tolist()[i : i + 128 // n_par_region])
+                token_per_region.append(chunk_sum)
+
+            print(f"Unselected region: {token_per_region.count(0)}")
+            # on_chip_requirement_val = (
+            #     on_chip_requirement_val
+            #     - token_per_region.count(0) * expert_region_unit_on_chip
+            # )
+
+            # ------------ Print the results ------------
+            # print(f"Off-chip traffic (KB): {round(off_chip_traffic_val / 1024, 2)}")
+            # print(
+            #     f"On-chip requirement (KB): {round(on_chip_requirement_val / 1024, 2)}"
+            # )
+            # print(f"Cycles: {cycles}")
+            # print(f"Duration: {duration_s} s")
+
+            dict_to_append = {
+                "batch": B,
+                "n_par_region": n_par_region,
+                "n_expert_per_region": model_config.n_routed_experts // n_par_region,
+                "unit_flops": unit_flops,
+                "round_N": round_N,
+                "tile_F": tile_F,
+                "flops": alg_flops,  # FLOP of the algorithm itself
+                "cycles": cycles,
+                "duration_s": duration_s,
+                "off_chip_traffic_bytes": 0,
+                "on_chip_requirement_bytes": 0,
+                "allocated_flops": allocated_comp_flops,
+                "utilization(%)": round(
+                    (alg_flops / cycles) / allocated_comp_flops * 100, 2
+                ),
+            }
+            print(dict_to_append)
+            results.append(dict_to_append)
 
     out_file = (
         f"timeshare_mem_bound/"
         + f"qwen_{model_config.dim}_{model_config.moe_inter_dim}_"
-        + f"iter{iter:03d}_layer_{layer:03d}_n{tile_N}_f{tile_F}_"
-        + f"timeshare_membound_revet_"
+        + f"iter{iter:03d}_layer_{layer:03d}_round_{round_N}_f{tile_F}_"
+        + f"timeshare_membound_dyn_tile_"
         + f"{time.strftime("%d%H%M%S")}.csv"
     )
     try:
@@ -1023,7 +1039,7 @@ def test_timeshare_mn_mk_gemm_reshape():
                 "n_par_region",
                 "n_expert_per_region",
                 "unit_flops",
-                "tile_N",
+                "round_N",
                 "tile_F",
                 "flops",
                 "cycles",
@@ -1050,12 +1066,12 @@ def test_baseline_for_membound_timeshare():
     mock_bf16 = True
     par_dispatch = 1
     # ------------ Model Configuration ------------
-    model_config = SmallerQwen30b()
+    # model_config = SmallerQwen30b()
     # model_config = TinyQwen30b()
-    # model_config = Qwen30b()
+    model_config = Qwen30b()
 
     round_N = 1
-    tile_Fs = [64]  # For the model_config.moe_inter_dim
+    tile_Fs = [48]  # For the model_config.moe_inter_dim
 
     base_flops = 1024  # unit flop for 128 case (no time sharing)
     flops_for_weighted_sum = 1024  # fixed among sweep
