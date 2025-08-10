@@ -1,0 +1,2 @@
+batch,tile_N,tile_F,flops,padded_flops,cycles,duration_s,off_chip_traffic_bytes,on_chip_requirement_bytes
+64,16,64,157842800640,52614266880,4644999,2719,4229431552,18915330
