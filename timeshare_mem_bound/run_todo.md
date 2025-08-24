@@ -1,10 +1,10 @@
 # Configuration Time-multiplexing
 
-Running (tmux 15. Will be stored with qwen_xxx_revet_xxx.csv)
-* Qwen (batch 64)
+Done
+* Qwen (batch 64): /home/ginasohn/step_tl/timeshare_mem_bound/qwen_2048_768_iter032_layer_012_n32_f48_timeshare_membound_revet_09042055.csv
     * Revet Static (64)
     * Revet Static (16)
 
-Todo
+Running (tmux 15)
 * Qwen (batch 64)
     * dynamic

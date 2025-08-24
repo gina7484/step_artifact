@@ -507,25 +507,25 @@ def test_b64_b16_sweep():
     # ---- config for batch 80 ----
     batch_list_b80 = [
         # batch with high stdev
-        {"start": 981, "end": 1060, "stdev": 1413},
-        # {"start": 3227, "end": 3306, "stdev": 1334},
-        # {"start": 815, "end": 894, "stdev": 1310},
-        # # batch with medium_high stdev
+        # {"start": 981, "end": 1060, "stdev": 1413},
+        {"start": 3227, "end": 3306, "stdev": 1334},
+        {"start": 815, "end": 894, "stdev": 1310},
+        # batch with medium_high stdev
         # {"start": 3537, "end": 3616, "stdev": 1226},
         # {"start": 4059, "end": 4138, "stdev": 1225},
         # {"start": 869, "end": 948, "stdev": 1224},
-        # # batch with similar stdev
-        # {"start": 4687, "end": 4766, "stdev": 987},
-        # {"start": 3989, "end": 4068, "stdev": 986},
-        # {"start": 1891, "end": 1970, "stdev": 987},
-        # # batch with medium_low stdev
+        # batch with similar stdev
+        {"start": 4687, "end": 4766, "stdev": 987},
+        {"start": 3989, "end": 4068, "stdev": 986},
+        {"start": 1891, "end": 1970, "stdev": 987},
+        # batch with medium_low stdev
         # {"start": 309, "end": 388, "stdev": 755},
         # {"start": 2115, "end": 2194, "stdev": 754},
         # {"start": 101, "end": 180, "stdev": 754},
-        # # batch with lowest stdev
-        # {"start": 4181, "end": 4260, "stdev": 562},
-        # {"start": 135, "end": 214, "stdev": 531},
-        # {"start": 2025, "end": 2104, "stdev": 529},
+        # batch with lowest stdev
+        {"start": 4181, "end": 4260, "stdev": 562},
+        {"start": 135, "end": 214, "stdev": 531},
+        {"start": 2025, "end": 2104, "stdev": 529},
     ]
 
     results = []

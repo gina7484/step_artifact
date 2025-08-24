@@ -119,7 +119,9 @@ def save_graph_format(
 
     if "png" in format:
         agraph.draw(f"{output_filename}.png", prog="dot", format="png")
+        print(f"finished writing the STEP GRAPH to {output_filename}.png")
     if "svg" in format:
         agraph.draw(f"{output_filename}.svg", prog="dot", format="svg")
+        print(f"finished writing the STEP GRAPH to {output_filename}.svg")
 
     print(f"finished writing the STEP GRAPH to {output_filename}")

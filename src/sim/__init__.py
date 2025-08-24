@@ -161,7 +161,7 @@ def to_pb_init_func(op_fn: init_fn.InitFn) -> func_pb2.InitFunc:
 
 
 def to_pb_datatype(
-    dtype: Union[Tile, Buffer, Select, ElementTP]
+    dtype: Union[Tile, Buffer, Select, ElementTP],
 ) -> datatype_pb2.DataType:
     if isinstance(dtype, (Tile, DynTile)):
         if isinstance(dtype.tile_dtype, Float32):
