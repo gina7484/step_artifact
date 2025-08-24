@@ -51,11 +51,12 @@ def test_gemm_sweep():
 
     # ------------ Expert Indices ------------
     batch = 1024  # 256, 512, 1024
-    layer = 24  # 0 (even), 24 (middle), 30 (uneven)
-    expert_selection_file = f"/home/ginasohn/expert_routing/processed_qwen/expr_large_b/token1_layer{layer}_b{batch}.npz"
+    iter = 19
+    layer = 9
+    expert_selection_file = f"/home/ginasohn/expert_routing/processed_mixtral8x7b_4070_5763/per_iter_per_layer/iter_{iter:03d}_layer_{layer:03d}.npz"
     expert_indices_npz = np.load(expert_selection_file)
     expert_indices = torch.from_numpy(
-        expert_indices_npz["arr_0"]
+        expert_indices_npz["data"]
     )  # [B, n_activated_experts]
 
     # expert_counts: [n_routed_experts] (bincount across all batches)
@@ -157,7 +158,7 @@ def test_gemm_sweep():
             out_file = (
                 f"/home/ginasohn/step_tl/dyn_tiling/"
                 + f"mixtral_b{batch}_{model_config.dim}_{model_config.moe_inter_dim}_"
-                + f"layer_{layer:03d}_n{tile_N}_f{tile_F}_"
+                + f"iter_{iter:03d}_layer_{layer:03d}_n{tile_N}_f{tile_F}_"
                 + f"{time.strftime("%d%H%M%S")}.csv"
             )
             try:
@@ -199,11 +200,12 @@ def test_gemm_dyn_tile():
 
     # ------------ Expert Indices ------------
     batch = 1024  # 256, 512, 1024
-    layer = 24  # 0 (even), 24 (middle), 30 (uneven)
-    expert_selection_file = f"/home/ginasohn/expert_routing/processed_qwen/expr_large_b/token1_layer{layer}_b{batch}.npz"
+    iter = 19
+    layer = 9
+    expert_selection_file = f"/home/ginasohn/expert_routing/processed_mixtral8x7b_4070_5763/per_iter_per_layer/iter_{iter:03d}_layer_{layer:03d}.npz"
     expert_indices_npz = np.load(expert_selection_file)
     expert_indices = torch.from_numpy(
-        expert_indices_npz["arr_0"]
+        expert_indices_npz["data"]
     )  # [B, n_activated_experts]
 
     # expert_counts: [n_routed_experts] (bincount across all batches)
@@ -322,7 +324,7 @@ def test_gemm_dyn_tile():
         out_file = (
             f"/home/ginasohn/step_tl/dyn_tiling/"
             + f"mixtral_b{batch}_{model_config.dim}_{model_config.moe_inter_dim}_"
-            + f"round_{round_N}_layer_{layer:03d}_"
+            + f"round_{round_N}_iter_{iter:03d}_layer_{layer:03d}_"
             + f"n_dyn_f{tile_F}_{time.strftime("%d%H%M%S")}.csv"
         )
         try:
