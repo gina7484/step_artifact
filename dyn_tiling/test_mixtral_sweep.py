@@ -42,9 +42,9 @@ class Mixtral8x7b:
 def test_gemm_sweep():
     mock_bf16 = True
     # ------------ Model Configuration ------------
-    # model_config = SmallerMixtral()
+    model_config = SmallerMixtral()
     # model_config = TinyMixtral()
-    model_config = Mixtral8x7b()
+    # model_config = Mixtral8x7b()
 
     tile_Ns = [64, 16]  # For the batch dim (64)
     tile_Fs = [64]  # For the model_config.moe_inter_dim
@@ -188,12 +188,12 @@ def test_gemm_sweep():
 def test_gemm_dyn_tile():
     mock_bf16 = True
     # ------------ Model Configuration ------------
-    # model_config = SmallerMixtral()
+    model_config = SmallerMixtral()
     # model_config = TinyMixtral()
-    model_config = Mixtral8x7b()
+    # model_config = Mixtral8x7b()
 
     # tile_Ns = [64]  # For the batch dim (64)
-    round_N = 1
+    round_N = 8
     tile_Fs = [64]  # For the model_config.moe_inter_dim
 
     # ------------ Expert Indices ------------
@@ -223,18 +223,22 @@ def test_gemm_dyn_tile():
     for tile_F in tile_Fs:
         results = []
 
-        off_chip_traffic, on_chip_requirement, cycles, duration_s = (
-            run_ws_tile_mn_mk_dyn_tile(
-                round_N,
-                tile_F,
-                input_tensor,
-                expert_indices,
-                model_config,
-                "timing",  # "full",
-                False,
-                mock_bf16,
-                # logging=f"expert_par_gemm_dyn_tile_round_{round_N}_f{tile_F}",
-            )
+        (
+            off_chip_traffic,
+            on_chip_requirement,
+            cycles,
+            duration_s,
+            unit_expert_on_chip,
+        ) = run_ws_tile_mn_mk_dyn_tile(
+            round_N,
+            tile_F,
+            input_tensor,
+            expert_indices,
+            model_config,
+            "timing",  # "full",
+            False,
+            mock_bf16,
+            # logging=f"expert_par_gemm_dyn_tile_round_{round_N}_f{tile_F}",
         )
 
         # ------------ substitue symbols in the off_chip_traffic and on_chip_requirement ------------
