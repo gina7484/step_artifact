@@ -42,9 +42,9 @@ class Mixtral8x7b:
 def test_gemm_sweep():
     mock_bf16 = True
     # ------------ Model Configuration ------------
-    model_config = SmallerMixtral()
+    # model_config = SmallerMixtral()
     # model_config = TinyMixtral()
-    # model_config = Mixtral8x7b()
+    model_config = Mixtral8x7b()
 
     tile_Ns = [64, 16]  # For the batch dim (64)
     tile_Fs = [64]  # For the model_config.moe_inter_dim
@@ -188,12 +188,12 @@ def test_gemm_sweep():
 def test_gemm_dyn_tile():
     mock_bf16 = True
     # ------------ Model Configuration ------------
-    model_config = SmallerMixtral()
+    # model_config = SmallerMixtral()
     # model_config = TinyMixtral()
-    # model_config = Mixtral8x7b()
+    model_config = Mixtral8x7b()
 
     # tile_Ns = [64]  # For the batch dim (64)
-    round_N = 8
+    round_N = 1
     tile_Fs = [64]  # For the model_config.moe_inter_dim
 
     # ------------ Expert Indices ------------
