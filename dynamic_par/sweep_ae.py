@@ -89,7 +89,10 @@ def test_b64_sweep():
 
     results = []
 
+    raw_results = []
+
     for kv_length_var, batch_list in batch_list_b64.items():
+
         result_dict = {}
         result_dict["kv_length_var"] = kv_length_var
 
@@ -98,6 +101,9 @@ def test_b64_sweep():
         dynamic_cycles_list = []
 
         for batch_spec in batch_list:
+            raw_result_dict = {}
+            raw_result_dict["kv_length_var"] = kv_length_var
+
             assert (
                 batch == batch_spec["end"] - batch_spec["start"] + 1
             ), "Batch must be equal to high - low + 1"
@@ -142,7 +148,7 @@ def test_b64_sweep():
                 offset=offset,
                 compute_bw=compute_bw,
                 mock_bf16=True,
-                simulate_rust="full",  # "full", "timing", "serialize", None
+                simulate_rust="timing",  # "full", "timing", "serialize", None
                 check_gold=False,
                 save_graph=True,
             )
@@ -167,7 +173,7 @@ def test_b64_sweep():
                 offset=offset,
                 compute_bw=compute_bw,
                 mock_bf16=True,
-                simulate_rust="full",  # "full", "timing", "serialize", None
+                simulate_rust="timing",  # "full", "timing", "serialize", None
                 check_gold=False,
                 save_graph=True,
             )
@@ -193,7 +199,7 @@ def test_b64_sweep():
                 offset=offset,
                 compute_bw=compute_bw,
                 mock_bf16=True,
-                simulate_rust="full",  # "full", "timing", "serialize", None
+                simulate_rust="timing",  # "full", "timing", "serialize", None
                 check_gold=False,
                 save_graph=True,
             )
@@ -212,6 +218,12 @@ def test_b64_sweep():
             )
 
             dynamic_cycles_list.append(dynamic_cycles / dynamic_cycles)
+
+            raw_result_dict["stdev"] = batch_spec["stdev"]
+            raw_result_dict["static_coarse_cycles"] = static_coarse_cycles
+            raw_result_dict["static_interleave_cycles"] = static_interleave_cycles
+            raw_result_dict["dynamic_cycles"] = dynamic_cycles
+            raw_results.append(raw_result_dict)
 
         normalized_static_coarse = math.prod(static_coarse_cycles_list) ** (
             1 / len(static_coarse_cycles_list)
@@ -247,6 +259,37 @@ def test_b64_sweep():
                 writer.writerow(
                     {
                         "kv_length_var": result["kv_length_var"],
+                        "static_coarse_cycles": result["static_coarse_cycles"],
+                        "static_interleave_cycles": result["static_interleave_cycles"],
+                        "dynamic_cycles": result["dynamic_cycles"],
+                    }
+                )
+
+        print(f"Results written to {out_file}")
+    except Exception as e:
+        print(f"Error writing CSV file: {e}")
+
+    # save results to csv
+    out_file = f"./dynamic_par/batch64_sweep_ae_raw.csv"
+    try:
+        with open(out_file, "w", newline="", encoding="utf-8") as csvfile:
+            fieldnames = [
+                "kv_length_var",
+                "stdev",
+                "static_coarse_cycles",
+                "static_interleave_cycles",
+                "dynamic_cycles",
+            ]
+            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+
+            writer.writeheader()
+
+            # Write data rows
+            for result in raw_results:
+                writer.writerow(
+                    {
+                        "kv_length_var": result["kv_length_var"],
+                        "stdev": result["stdev"],
                         "static_coarse_cycles": result["static_coarse_cycles"],
                         "static_interleave_cycles": result["static_interleave_cycles"],
                         "dynamic_cycles": result["dynamic_cycles"],
@@ -306,6 +349,9 @@ def test_b16_sweep():
     check_intermediate = False
 
     results = []
+
+    raw_results = []
+
     for kv_length_var, batch_list in batch_list_b16.items():
         result_dict = {}
         result_dict["kv_length_var"] = kv_length_var
@@ -315,6 +361,9 @@ def test_b16_sweep():
         dynamic_cycles_list = []
 
         for batch_spec in batch_list:
+            raw_result_dict = {}
+            raw_result_dict["kv_length_var"] = kv_length_var
+
             # ====== Cache config ======
             maxN = batch_spec["max_N"]
             tile_N = 32
@@ -368,7 +417,7 @@ def test_b16_sweep():
                 offset=offset,
                 compute_bw=compute_bw,
                 mock_bf16=True,
-                simulate_rust="full",  # "full", "timing", "serialize", None
+                simulate_rust="timing",  # "full", "timing", "serialize", None
                 check_gold=False,
                 save_graph=True,
             )
@@ -394,7 +443,7 @@ def test_b16_sweep():
                 offset=offset,
                 compute_bw=compute_bw,
                 mock_bf16=True,
-                simulate_rust="full",  # "full", "timing", "serialize", None
+                simulate_rust="timing",  # "full", "timing", "serialize", None
                 check_gold=False,
                 save_graph=True,
             )
@@ -420,7 +469,7 @@ def test_b16_sweep():
                 offset=offset,
                 compute_bw=compute_bw,
                 mock_bf16=True,
-                simulate_rust="full",  # "full", "timing", "serialize", None
+                simulate_rust="timing",  # "full", "timing", "serialize", None
                 check_gold=False,
                 save_graph=True,
             )
@@ -440,6 +489,12 @@ def test_b16_sweep():
             )
 
             dynamic_cycles_list.append(dynamic_cycles / dynamic_cycles)
+
+            raw_result_dict["stdev"] = batch_spec["stdev"]
+            raw_result_dict["static_coarse_cycles"] = static_coarse_cycles
+            raw_result_dict["static_interleave_cycles"] = static_interleave_cycles
+            raw_result_dict["dynamic_cycles"] = dynamic_cycles
+            raw_results.append(raw_result_dict)
 
         normalized_static_coarse = math.prod(static_coarse_cycles_list) ** (
             1 / len(static_coarse_cycles_list)
@@ -476,6 +531,37 @@ def test_b16_sweep():
                 writer.writerow(
                     {
                         "kv_length_var": result["kv_length_var"],
+                        "static_coarse_cycles": result["static_coarse_cycles"],
+                        "static_interleave_cycles": result["static_interleave_cycles"],
+                        "dynamic_cycles": result["dynamic_cycles"],
+                    }
+                )
+
+        print(f"Results written to {out_file}")
+    except Exception as e:
+        print(f"Error writing CSV file: {e}")
+
+    # save results to csv
+    out_file = f"./dynamic_par/batch16_sweep_ae_raw.csv"
+    try:
+        with open(out_file, "w", newline="", encoding="utf-8") as csvfile:
+            fieldnames = [
+                "kv_length_var",
+                "stdev",
+                "static_coarse_cycles",
+                "static_interleave_cycles",
+                "dynamic_cycles",
+            ]
+            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+
+            writer.writeheader()
+
+            # Write data rows
+            for result in raw_results:
+                writer.writerow(
+                    {
+                        "kv_length_var": result["kv_length_var"],
+                        "stdev": result["stdev"],
                         "static_coarse_cycles": result["static_coarse_cycles"],
                         "static_interleave_cycles": result["static_interleave_cycles"],
                         "dynamic_cycles": result["dynamic_cycles"],
@@ -546,6 +632,8 @@ def test_b64_b16_sweep():
 
     results = []
 
+    raw_results = []
+
     for kv_length_var, batch_list in batch_list_b80.items():
         result_dict = {}
         result_dict["kv_length_var"] = kv_length_var
@@ -555,6 +643,8 @@ def test_b64_b16_sweep():
         dynamic_cycles_list = []
 
         for batch_spec in batch_list:
+            raw_result_dict = {}
+            raw_result_dict["kv_length_var"] = kv_length_var
 
             assert (
                 batch == batch_spec["end"] - batch_spec["start"] + 1
@@ -600,7 +690,7 @@ def test_b64_b16_sweep():
                 offset=offset,
                 compute_bw=compute_bw,
                 mock_bf16=True,
-                simulate_rust="full",  # "full", "timing", "serialize", None
+                simulate_rust="timing",  # "full", "timing", "serialize", None
                 check_gold=False,
                 save_graph=True,
             )
@@ -626,7 +716,7 @@ def test_b64_b16_sweep():
                 offset=offset,
                 compute_bw=compute_bw,
                 mock_bf16=True,
-                simulate_rust="full",  # "full", "timing", "serialize", None
+                simulate_rust="timing",  # "full", "timing", "serialize", None
                 check_gold=False,
                 save_graph=True,
             )
@@ -652,7 +742,7 @@ def test_b64_b16_sweep():
                 offset=offset,
                 compute_bw=compute_bw,
                 mock_bf16=True,
-                simulate_rust="full",  # "full", "timing", "serialize", None
+                simulate_rust="timing",  # "full", "timing", "serialize", None
                 check_gold=False,
                 save_graph=True,
             )
@@ -672,6 +762,12 @@ def test_b64_b16_sweep():
             )
 
             dynamic_cycles_list.append(dynamic_cycles / dynamic_cycles)
+
+            raw_result_dict["stdev"] = batch_spec["stdev"]
+            raw_result_dict["static_coarse_cycles"] = static_coarse_cycles
+            raw_result_dict["static_interleave_cycles"] = static_interleave_cycles
+            raw_result_dict["dynamic_cycles"] = dynamic_cycles
+            raw_results.append(raw_result_dict)
 
         normalized_static_coarse = math.prod(static_coarse_cycles_list) ** (
             1 / len(static_coarse_cycles_list)
@@ -708,6 +804,37 @@ def test_b64_b16_sweep():
                 writer.writerow(
                     {
                         "kv_length_var": result["kv_length_var"],
+                        "static_coarse_cycles": result["static_coarse_cycles"],
+                        "static_interleave_cycles": result["static_interleave_cycles"],
+                        "dynamic_cycles": result["dynamic_cycles"],
+                    }
+                )
+
+        print(f"Results written to {out_file}")
+    except Exception as e:
+        print(f"Error writing CSV file: {e}")
+
+    # save results to csv
+    out_file = f"./dynamic_par/batch80_sweep_ae_raw.csv"
+    try:
+        with open(out_file, "w", newline="", encoding="utf-8") as csvfile:
+            fieldnames = [
+                "kv_length_var",
+                "stdev",
+                "static_coarse_cycles",
+                "static_interleave_cycles",
+                "dynamic_cycles",
+            ]
+            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+
+            writer.writeheader()
+
+            # Write data rows
+            for result in raw_results:
+                writer.writerow(
+                    {
+                        "kv_length_var": result["kv_length_var"],
+                        "stdev": result["stdev"],
                         "static_coarse_cycles": result["static_coarse_cycles"],
                         "static_interleave_cycles": result["static_interleave_cycles"],
                         "dynamic_cycles": result["dynamic_cycles"],
