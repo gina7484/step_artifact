@@ -108,7 +108,7 @@ def test_b64_sweep():
                 batch == batch_spec["end"] - batch_spec["start"] + 1
             ), "Batch must be equal to high - low + 1"
 
-            trace_file = f"/home/ginasohn/step_tl/dynamic_par/azure_trace/b{batch}/conv_stdev{batch_spec['stdev']:04d}_{batch_spec['start']:04d}_{batch_spec['end']:04d}.npy"
+            trace_file = f"./dynamic_par/azure_trace/b{batch}/conv_stdev{batch_spec['stdev']:04d}_{batch_spec['start']:04d}_{batch_spec['end']:04d}.npy"
             raw_np_arr = np.load(trace_file)
             np_arr_int = raw_np_arr.astype(np.int64)
             num_token_list = np_arr_int.tolist()
@@ -154,7 +154,7 @@ def test_b64_sweep():
             )
             if check_intermediate:
                 with open(
-                    f"/home/ginasohn/step_tl/dynamic_par/static_coarse_stdev{batch_spec['stdev']:04d}_{batch_spec['start']:04d}_{batch_spec['end']:04d}.txt",
+                    f"./dynamic_par/static_coarse_stdev{batch_spec['stdev']:04d}_{batch_spec['start']:04d}_{batch_spec['end']:04d}.txt",
                     "a",
                     encoding="utf-8",
                 ) as file:
@@ -180,7 +180,7 @@ def test_b64_sweep():
 
             if check_intermediate:
                 with open(
-                    f"/home/ginasohn/step_tl/dynamic_par/static_interleave_stdev{batch_spec['stdev']:04d}_{batch_spec['start']:04d}_{batch_spec['end']:04d}.txt",
+                    f"./dynamic_par/static_interleave_stdev{batch_spec['stdev']:04d}_{batch_spec['start']:04d}_{batch_spec['end']:04d}.txt",
                     "a",
                     encoding="utf-8",
                 ) as file:
@@ -205,7 +205,7 @@ def test_b64_sweep():
             )
             if check_intermediate:
                 with open(
-                    f"/home/ginasohn/step_tl/dynamic_par/dynamic_interleave_stdev{batch_spec['stdev']:04d}_{batch_spec['start']:04d}_{batch_spec['end']:04d}.txt",
+                    f"./dynamic_par/dynamic_interleave_stdev{batch_spec['stdev']:04d}_{batch_spec['start']:04d}_{batch_spec['end']:04d}.txt",
                     "a",
                     encoding="utf-8",
                 ) as file:
@@ -377,7 +377,7 @@ def test_b16_sweep():
                 batch == batch_spec["end"] - batch_spec["start"] + 1
             ), "Batch must be equal to high - low + 1"
 
-            trace_file = f"/home/ginasohn/step_tl/dynamic_par/azure_trace/b{batch}/conv_stdev{batch_spec['stdev']:04d}_{batch_spec['start']:04d}_{batch_spec['end']:04d}.npy"
+            trace_file = f"./dynamic_par/azure_trace/b{batch}/conv_stdev{batch_spec['stdev']:04d}_{batch_spec['start']:04d}_{batch_spec['end']:04d}.npy"
             raw_np_arr = np.load(trace_file)
             np_arr_int = raw_np_arr.astype(np.int64)
             num_token_list = np_arr_int.tolist()
@@ -424,7 +424,7 @@ def test_b16_sweep():
 
             if check_intermediate:
                 with open(
-                    f"/home/ginasohn/step_tl/dynamic_par/static_coarse_b16_stdev{batch_spec['stdev']:04d}_{batch_spec['start']:04d}_{batch_spec['end']:04d}.txt",
+                    f"./dynamic_par/static_coarse_b16_stdev{batch_spec['stdev']:04d}_{batch_spec['start']:04d}_{batch_spec['end']:04d}.txt",
                     "a",
                     encoding="utf-8",
                 ) as file:
@@ -450,7 +450,7 @@ def test_b16_sweep():
 
             if check_intermediate:
                 with open(
-                    f"/home/ginasohn/step_tl/dynamic_par/static_interleave_b16_stdev{batch_spec['stdev']:04d}_{batch_spec['start']:04d}_{batch_spec['end']:04d}.txt",
+                    f"./dynamic_par/static_interleave_b16_stdev{batch_spec['stdev']:04d}_{batch_spec['start']:04d}_{batch_spec['end']:04d}.txt",
                     "a",
                     encoding="utf-8",
                 ) as file:
@@ -476,7 +476,7 @@ def test_b16_sweep():
 
             if check_intermediate:
                 with open(
-                    f"/home/ginasohn/step_tl/dynamic_par/dynamic_interleave_b16_stdev{batch_spec['stdev']:04d}_{batch_spec['start']:04d}_{batch_spec['end']:04d}.txt",
+                    f"./dynamic_par/dynamic_interleave_b16_stdev{batch_spec['stdev']:04d}_{batch_spec['start']:04d}_{batch_spec['end']:04d}.txt",
                     "a",
                     encoding="utf-8",
                 ) as file:
@@ -650,7 +650,7 @@ def test_b64_b16_sweep():
                 batch == batch_spec["end"] - batch_spec["start"] + 1
             ), "Batch must be equal to high - low + 1"
 
-            trace_file = f"/home/ginasohn/step_tl/dynamic_par/azure_trace/b{batch}/conv_stdev{batch_spec['stdev']:04d}_{batch_spec['start']:04d}_{batch_spec['end']:04d}.npy"
+            trace_file = f"./dynamic_par/azure_trace/b{batch}/conv_stdev{batch_spec['stdev']:04d}_{batch_spec['start']:04d}_{batch_spec['end']:04d}.npy"
             raw_np_arr = np.load(trace_file)
             np_arr_int = raw_np_arr.astype(np.int64)
             num_token_list = np_arr_int.tolist()
@@ -697,7 +697,7 @@ def test_b64_b16_sweep():
 
             if check_intermediate:
                 with open(
-                    f"/home/ginasohn/step_tl/dynamic_par/static_coarse_b80_stdev{batch_spec['stdev']:04d}_{batch_spec['start']:04d}_{batch_spec['end']:04d}.txt",
+                    f"./dynamic_par/static_coarse_b80_stdev{batch_spec['stdev']:04d}_{batch_spec['start']:04d}_{batch_spec['end']:04d}.txt",
                     "a",
                     encoding="utf-8",
                 ) as file:
@@ -723,7 +723,7 @@ def test_b64_b16_sweep():
 
             if check_intermediate:
                 with open(
-                    f"/home/ginasohn/step_tl/dynamic_par/static_interleave_b80_stdev{batch_spec['stdev']:04d}_{batch_spec['start']:04d}_{batch_spec['end']:04d}.txt",
+                    f"./dynamic_par/static_interleave_b80_stdev{batch_spec['stdev']:04d}_{batch_spec['start']:04d}_{batch_spec['end']:04d}.txt",
                     "a",
                     encoding="utf-8",
                 ) as file:
@@ -749,7 +749,7 @@ def test_b64_b16_sweep():
 
             if check_intermediate:
                 with open(
-                    f"/home/ginasohn/step_tl/dynamic_par/dynamic_interleave_b80_stdev{batch_spec['stdev']:04d}_{batch_spec['start']:04d}_{batch_spec['end']:04d}.txt",
+                    f"./dynamic_par/dynamic_interleave_b80_stdev{batch_spec['stdev']:04d}_{batch_spec['start']:04d}_{batch_spec['end']:04d}.txt",
                     "a",
                     encoding="utf-8",
                 ) as file:
@@ -875,7 +875,7 @@ def test_max_len_b64():
             64 == batch_spec["end"] - batch_spec["start"] + 1
         ), "Batch must be equal to high - low + 1"
 
-        trace_file = f"/home/ginasohn/step_tl/dynamic_par/azure_trace/b{64}/conv_stdev{batch_spec['stdev']:04d}_{batch_spec['start']:04d}_{batch_spec['end']:04d}.npy"
+        trace_file = f"./dynamic_par/azure_trace/b{64}/conv_stdev{batch_spec['stdev']:04d}_{batch_spec['start']:04d}_{batch_spec['end']:04d}.npy"
         raw_np_arr = np.load(trace_file)
         np_arr_int = raw_np_arr.astype(np.int64)
         num_token_list = np_arr_int.tolist()
@@ -940,7 +940,7 @@ def test_max_len_b16():
             16 == batch_spec["end"] - batch_spec["start"] + 1
         ), "Batch must be equal to high - low + 1"
 
-        trace_file = f"/home/ginasohn/step_tl/dynamic_par/azure_trace/b{16}/conv_stdev{batch_spec['stdev']:04d}_{batch_spec['start']:04d}_{batch_spec['end']:04d}.npy"
+        trace_file = f"./dynamic_par/azure_trace/b{16}/conv_stdev{batch_spec['stdev']:04d}_{batch_spec['start']:04d}_{batch_spec['end']:04d}.npy"
         raw_np_arr = np.load(trace_file)
         np_arr_int = raw_np_arr.astype(np.int64)
         num_token_list = np_arr_int.tolist()
@@ -1002,7 +1002,7 @@ def test_max_len_b80():
             80 == batch_spec["end"] - batch_spec["start"] + 1
         ), "Batch must be equal to high - low + 1"
 
-        trace_file = f"/home/ginasohn/step_tl/dynamic_par/azure_trace/b{80}/conv_stdev{batch_spec['stdev']:04d}_{batch_spec['start']:04d}_{batch_spec['end']:04d}.npy"
+        trace_file = f"./dynamic_par/azure_trace/b{80}/conv_stdev{batch_spec['stdev']:04d}_{batch_spec['start']:04d}_{batch_spec['end']:04d}.npy"
         raw_np_arr = np.load(trace_file)
         np_arr_int = raw_np_arr.astype(np.int64)
         num_token_list = np_arr_int.tolist()

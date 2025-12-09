@@ -297,7 +297,7 @@ def run_static_coarse_par(
                 False,  # logging
                 hbm_config,
                 sim_config,
-                "/home/ginasohn/step_tl/graph.pb",
+                "./graph.pb",
             )
         else:
             assert isinstance(logging, str), "Logging must be a string path"
@@ -306,11 +306,11 @@ def run_static_coarse_par(
                 True,  # logging
                 hbm_config,
                 sim_config,
-                "/home/ginasohn/step_tl/graph.pb",
+                "./graph.pb",
                 logging,
             )
     elif simulate_rust == "serialize":
-        serialize(step_graph, "/home/ginasohn/step_tl/graph.pb", False)
+        serialize(step_graph, "./graph.pb", False)
 
     # Gold check
     if check_gold:
@@ -458,7 +458,7 @@ def run_static_coarse_par_b80(
                 False,  # logging
                 hbm_config,
                 sim_config,
-                "/home/ginasohn/step_tl/graph.pb",
+                "./graph.pb",
             )
         else:
             assert isinstance(logging, str), "Logging must be a string path"
@@ -467,11 +467,11 @@ def run_static_coarse_par_b80(
                 True,  # logging
                 hbm_config,
                 sim_config,
-                "/home/ginasohn/step_tl/graph.pb",
+                "./graph.pb",
                 logging,
             )
     elif simulate_rust == "serialize":
-        serialize(step_graph, "/home/ginasohn/step_tl/graph.pb", False)
+        serialize(step_graph, "./graph.pb", False)
 
     # Gold check
     if check_gold:
