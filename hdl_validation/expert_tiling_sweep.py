@@ -908,8 +908,8 @@ def test_expert_tiling_sweep_single_schedule():
                 "tile_b",
                 "dim",
                 "tile_inter",
-                "cycles",
-                "off_chip_mem_traffic(MB)"
+                "cycles (STeP sim)",
+                "off_chip_mem_traffic(MB) (STeP sim)"
             ]
             writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
             writer.writeheader()
@@ -919,8 +919,8 @@ def test_expert_tiling_sweep_single_schedule():
                     "tile_b": tiling_size["tile_m"],
                     "dim": model_config.dim,
                     "tile_inter": tiling_size["tile_n"],
-                    "cycles": metrics.cycles,
-                    "off_chip_mem_traffic(MB)": round(metrics.off_chip_traffic / 1e6,2),
+                    "cycles (STeP sim)": metrics.cycles,
+                    "off_chip_mem_traffic(MB) (STeP sim)": round(metrics.off_chip_traffic / 1e6,2),
                 })
     
             print(f"Results written to {out_file}")
