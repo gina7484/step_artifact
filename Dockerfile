@@ -20,6 +20,6 @@ RUN python3 -m venv venv
 
 RUN source venv/bin/activate && \
     pip install torch --index-url https://download.pytorch.org/whl/cpu && \
-    pip install maturin numpy sympy networkx pygraphviz pandas protobuf
+    pip install maturin numpy sympy networkx pygraphviz pandas protobuf pytest
 
 RUN echo "source /root/step_artifact/venv/bin/activate" >> /root/.bashrc

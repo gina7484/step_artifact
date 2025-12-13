@@ -23,7 +23,7 @@
     pytest timeshare_mem_bound/test_membound_qwen_sweep_dyn_tile.py::test_dyn_tile -s
     ```
 
-* Time:
+* Time: full_c4(51m40s)
 
 * Note:
     The "performance_overhead(%)" column denotes the performance overhead over the baseline (128 parallel regions, 1 expert per region), which is the leftmost datapoint in Figure 8(b).

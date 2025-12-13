@@ -3,7 +3,6 @@ export PYTHONPATH=$(pwd)/src:$(pwd)/src/step_py:$(pwd)/src/sim:$(pwd)/src/proto
 # rustup override set 1.83.0
 rustup default 1.83.0
 
-# source ~/step_perf_venv/bin/activate
 
 cd step_perf_ir/proto
 mkdir -p ../../src/proto
