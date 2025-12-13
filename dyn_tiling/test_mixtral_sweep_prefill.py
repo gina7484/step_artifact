@@ -355,8 +355,8 @@ def test_gemm_dyn_tile():
 def test_mixtral_b1024():
     mock_bf16 = True
     # ------------ Model Configuration ------------
-    model_config = SmallerMixtral()
-    # model_config = Mixtral8x7b()
+    # model_config = SmallerMixtral()
+    model_config = Mixtral8x7b()
 
     
     # ------------ Expert Indices ------------

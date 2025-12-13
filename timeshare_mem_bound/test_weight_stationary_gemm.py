@@ -833,7 +833,7 @@ def test_gemm_sweep():
     # ------------ Expert Indices ------------
     iter = 22
     layer = 10
-    expert_selection_file = f"/home/ginasohn/expert_routing/processed_qwen/continuous_batching_80gb_max4192_per_layer/iter_{iter:03d}_layer_{layer:03d}.npz"
+    expert_selection_file = f"expert_routing/processed_qwen/continuous_batching_80gb_max4192_per_layer/iter_{iter:03d}_layer_{layer:03d}.npz"
     expert_indices_npz = np.load(expert_selection_file)
     expert_indices = torch.from_numpy(
         expert_indices_npz["data"]
@@ -977,7 +977,7 @@ def test_gemm_sweep_L0():
     # ------------ Expert Indices ------------
     iter = 22
     layer = 0
-    expert_selection_file = f"/home/ginasohn/expert_routing/processed_qwen/continuous_batching_80gb_max4192_per_layer/iter_{iter:03d}_layer_{layer:03d}.npz"
+    expert_selection_file = f"expert_routing/processed_qwen/continuous_batching_80gb_max4192_per_layer/iter_{iter:03d}_layer_{layer:03d}.npz"
     expert_indices_npz = np.load(expert_selection_file)
     expert_indices = torch.from_numpy(
         expert_indices_npz["data"]
@@ -1123,7 +1123,7 @@ def test_gemm_sweep_wo_sim():
     # ------------ Expert Indices ------------
     iter = 22
     layer = 10
-    expert_selection_file = f"/home/ginasohn/expert_routing/processed_qwen/continuous_batching_80gb_max4192_per_layer/iter_{iter:03d}_layer_{layer:03d}.npz"
+    expert_selection_file = f"expert_routing/processed_qwen/continuous_batching_80gb_max4192_per_layer/iter_{iter:03d}_layer_{layer:03d}.npz"
     expert_indices_npz = np.load(expert_selection_file)
     expert_indices = torch.from_numpy(
         expert_indices_npz["data"]

@@ -376,8 +376,8 @@ def test_qwen_b1024():
     mock_bf16 = True
 
     # ------------ Model Configuration ------------
-    model_config = SmallerQwen30b()
-    # model_config = Qwen30b()
+    # model_config = SmallerQwen30b()
+    model_config = Qwen30b()
 
 
     # ------------ Expert Indices ------------

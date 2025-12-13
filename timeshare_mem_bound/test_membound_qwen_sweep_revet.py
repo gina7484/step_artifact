@@ -871,7 +871,7 @@ def test_timeshare_mn_mk_gemm_reshape():
     # ------------ Expert Indices ------------
     iter = 32
     layer = 12
-    expert_selection_file = f"/home/ginasohn/expert_routing/processed_qwen/expr_per_layer/iter_{iter:03d}_layer_{layer:03d}.npz"
+    expert_selection_file = f"expert_routing/processed_qwen/expr_per_layer/iter_{iter:03d}_layer_{layer:03d}.npz"
     expert_indices_npz = np.load(expert_selection_file)
     expert_indices = torch.from_numpy(
         expert_indices_npz["data"]
@@ -1058,7 +1058,7 @@ def test_baseline_for_membound_timeshare():
     # ------------ Expert Indices ------------
     iter = 32
     layer = 12
-    expert_selection_file = f"/home/ginasohn/expert_routing/processed_qwen/expr_per_layer/iter_{iter:03d}_layer_{layer:03d}.npz"
+    expert_selection_file = f"expert_routing/processed_qwen/expr_per_layer/iter_{iter:03d}_layer_{layer:03d}.npz"
     expert_indices_npz = np.load(expert_selection_file)
     expert_indices = torch.from_numpy(
         expert_indices_npz["data"]
