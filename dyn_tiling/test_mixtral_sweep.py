@@ -155,7 +155,7 @@ def test_gemm_sweep():
             results.append(dict_to_append)
 
             out_file = (
-                f"/home/ginasohn/step_tl/dyn_tiling/mixtral_{model_config.dim}_"
+                f"./dyn_tiling/mixtral_{model_config.dim}_"
                 + f"{model_config.moe_inter_dim}_iter{iter:03d}_layer_{layer:03d}_"
                 + f"n{tile_N}_f{tile_F}_{time.strftime("%d%H%M%S")}.csv"
             )
@@ -313,7 +313,7 @@ def test_gemm_dyn_tile():
         results.append(dict_to_append)
 
         out_file = (
-            f"/home/ginasohn/step_tl/dyn_tiling/mixtral_{model_config.dim}_"
+            f"./dyn_tiling/mixtral_{model_config.dim}_"
             + f"{model_config.moe_inter_dim}_round_{round_N}_iter{iter:03d}_layer_{layer:03d}_"
             + f"n_dyn_f{tile_F}_{time.strftime("%d%H%M%S")}.csv"
         )
@@ -345,14 +345,14 @@ def test_gemm_dyn_tile():
 def test_mixtral_b64():
     mock_bf16 = True
     
-    # model_config = SmallerMixtral()
-    model_config = Mixtral8x7b()
+    model_config = SmallerMixtral()
+    # model_config = Mixtral8x7b()
 
 
     # ------------ Expert Indices ------------
     iter = 8
     layer = 10
-    expert_selection_file = f"/home/ginasohn/expert_routing/processed_mixtral/expr_per_layer/iter_{iter:03d}_layer_{layer:03d}.npz"
+    expert_selection_file = f"./dyn_tiling/expert_routing/mixtral_b64/iter_{iter:03d}_layer_{layer:03d}.npz"
     expert_indices_npz = np.load(expert_selection_file)
     expert_indices = torch.from_numpy(
         expert_indices_npz["data"]

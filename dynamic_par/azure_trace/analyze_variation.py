@@ -66,9 +66,9 @@ def analyze_context_tokens_std(input_file, output_file, batch_size):
 # Usage example
 if __name__ == "__main__":
     # Replace 'input.csv' and 'output.csv' with your actual file names
-    input_filename = "/home/ginasohn/step_tl/dynamic_par/azure_trace/AzureLLMInferenceTrace_conv_1_5000.csv"
+    input_filename = "./dynamic_par/azure_trace/AzureLLMInferenceTrace_conv_1_5000.csv"
     batch_size = 80
-    output_filename = f"/home/ginasohn/step_tl/dynamic_par/azure_trace/std_analysis_results_b{batch_size}.csv"
+    output_filename = f"./dynamic_par/azure_trace/std_analysis_results_b{batch_size}.csv"
 
     try:
         results = analyze_context_tokens_std(

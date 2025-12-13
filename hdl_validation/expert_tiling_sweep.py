@@ -556,7 +556,7 @@ def test_expert_tiling_sweep():
     #                 False,  # logging
     #                 hbm_config,
     #                 sim_config,
-    #                 "/home/ginasohn/step_tl/graph.pb",
+    #                 "./graph.pb",
     #             )
     #         else:
     #             assert isinstance(logging, str), "Logging must be a string path"
@@ -565,7 +565,7 @@ def test_expert_tiling_sweep():
     #                 True,  # logging
     #                 hbm_config,
     #                 sim_config,
-    #                 "/home/ginasohn/step_tl/graph.pb",
+    #                 "./graph.pb",
     #                 logging,
     #             )
 
@@ -870,7 +870,7 @@ def test_expert_tiling_sweep_single_schedule():
                     False,  # logging
                     hbm_config,
                     sim_config,
-                    "/home/ginasohn/step_tl/graph.pb",
+                    "./graph.pb",
                 )
             else:
                 cycles, duration_ms, duration_s = simulate(
@@ -878,7 +878,7 @@ def test_expert_tiling_sweep_single_schedule():
                     True,  # logging
                     hbm_config,
                     sim_config,
-                    "/home/ginasohn/step_tl/graph.pb",
+                    "./graph.pb",
                     f"expert_{tiling_schedule_name}_{tile_m}_{tile_k}_{tile_n}_{tile_n_down}",
                 )
 

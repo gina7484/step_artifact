@@ -80,7 +80,7 @@ class TinyQwen30b:  # 32x scaled down version for each dimension
 #     for tile_N in tile_Ns:
 #         for tile_F in tile_Fs:
 #             out_file = (
-#                 f"/home/ginasohn/step_tl/dyn_tiling/"
+#                 f"./dyn_tiling/"
 #                 + f"qwen_b{batch}_{model_config.dim}_{model_config.moe_inter_dim}_"
 #                 + f"layer_{layer:03d}_n{tile_N}_f{tile_F}_"
 #                 + f"{time.strftime("%d%H%M%S")}.csv"
@@ -232,7 +232,7 @@ def test_gemm_dyn_tile():
         results = []
 
         out_file = (
-            f"/home/ginasohn/step_tl/dyn_tiling/"
+            f"./dyn_tiling/"
             + f"qwen_b{batch}_{model_config.dim}_{model_config.moe_inter_dim}_"
             + f"round_{round_N}_layer_{layer:03d}_n_dyn_f{tile_F}_"
             + f"{time.strftime("%d%H%M%S")}.csv"
@@ -399,7 +399,7 @@ def test_gemm_revet_sweep():
             results = []
 
             out_file = (
-                f"/home/ginasohn/step_tl/dyn_tiling/"
+                f"./dyn_tiling/"
                 + f"qwen_b{batch}_{model_config.dim}_{model_config.moe_inter_dim}_"
                 + f"layer_{layer:03d}_n{tile_N}_f{tile_F}_revet_"
                 + f"{time.strftime("%d%H%M%S")}.csv"

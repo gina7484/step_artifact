@@ -46,7 +46,7 @@ def extract_context_tokens(input_file, output_file, start_index, end_index, batc
 # Example usage:
 if __name__ == "__main__":
     # Example: extract ContextTokens for indices 2 to 4
-    input_filename = "/home/ginasohn/step_tl/dynamic_par/azure_trace/AzureLLMInferenceTrace_conv_1_5000.csv"
+    input_filename = "./dynamic_par/azure_trace/AzureLLMInferenceTrace_conv_1_5000.csv"
 
     # batch_size = 64
     # batch_list_b64 = [
@@ -74,7 +74,7 @@ if __name__ == "__main__":
     # for batch in batch_list_b64:
     #     extract_context_tokens(
     #         input_filename,
-    #         f"/home/ginasohn/step_tl/dynamic_par/azure_trace/b{batch_size}/conv_stdev{batch['stdev']:04d}_{batch['start']:04d}_{batch['end']:04d}.npy",
+    #         f"./dynamic_par/azure_trace/b{batch_size}/conv_stdev{batch['stdev']:04d}_{batch['start']:04d}_{batch['end']:04d}.npy",
     #         batch["start"],
     #         batch["end"],
     #         batch_size,
@@ -114,7 +114,7 @@ if __name__ == "__main__":
     # for batch in batch_list_b16:
     #     extract_context_tokens(
     #         input_filename,
-    #         f"/home/ginasohn/step_tl/dynamic_par/azure_trace/b{batch_size}/conv_stdev{batch['stdev']:04d}_{batch['start']:04d}_{batch['end']:04d}.npy",
+    #         f"./dynamic_par/azure_trace/b{batch_size}/conv_stdev{batch['stdev']:04d}_{batch['start']:04d}_{batch['end']:04d}.npy",
     #         batch["start"],
     #         batch["end"],
     #         batch_size,
@@ -146,7 +146,7 @@ if __name__ == "__main__":
     for batch in batch_list_b80:
         extract_context_tokens(
             input_filename,
-            f"/home/ginasohn/step_tl/dynamic_par/azure_trace/b{batch_size}/conv_stdev{batch['stdev']:04d}_{batch['start']:04d}_{batch['end']:04d}.npy",
+            f"./dynamic_par/azure_trace/b{batch_size}/conv_stdev{batch['stdev']:04d}_{batch['start']:04d}_{batch['end']:04d}.npy",
             batch["start"],
             batch["end"],
             batch_size,

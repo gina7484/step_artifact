@@ -543,7 +543,7 @@ def call_ws_tile_mn_mk_gemm_reshape_dyn_tile(
                 False,  # logging
                 hbm_config,
                 sim_config,
-                "/home/ginasohn/step_tl/graph.pb",
+                "./graph.pb",
             )
         else:
             assert isinstance(logging, str), "Logging must be a string path"
@@ -552,7 +552,7 @@ def call_ws_tile_mn_mk_gemm_reshape_dyn_tile(
                 True,  # logging
                 hbm_config,
                 sim_config,
-                "/home/ginasohn/step_tl/graph.pb",
+                "./graph.pb",
                 logging,
             )
 

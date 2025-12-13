@@ -597,7 +597,7 @@ def call_timeshare_mn_mk_gemm_reshape_fixed_fanout(
                 False,  # logging
                 hbm_config,
                 sim_config,
-                "/home/ginasohn/step_tl/graph.pb",
+                "./graph.pb",
             )
         else:
             assert isinstance(logging, str), "Logging must be a string path"
@@ -606,7 +606,7 @@ def call_timeshare_mn_mk_gemm_reshape_fixed_fanout(
                 True,  # logging
                 hbm_config,
                 sim_config,
-                "/home/ginasohn/step_tl/graph.pb",
+                "./graph.pb",
                 logging,
             )
 

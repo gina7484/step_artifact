@@ -156,7 +156,7 @@ def test_gemm_sweep():
             results.append(dict_to_append)
 
             out_file = (
-                f"/home/ginasohn/step_tl/dyn_tiling/"
+                f"./dyn_tiling/"
                 + f"mixtral_b{batch}_{model_config.dim}_{model_config.moe_inter_dim}_"
                 + f"iter_{iter:03d}_layer_{layer:03d}_n{tile_N}_f{tile_F}_"
                 + f"{time.strftime("%d%H%M%S")}.csv"
@@ -322,7 +322,7 @@ def test_gemm_dyn_tile():
         results.append(dict_to_append)
 
         out_file = (
-            f"/home/ginasohn/step_tl/dyn_tiling/"
+            f"./dyn_tiling/"
             + f"mixtral_b{batch}_{model_config.dim}_{model_config.moe_inter_dim}_"
             + f"round_{round_N}_iter_{iter:03d}_layer_{layer:03d}_"
             + f"n_dyn_f{tile_F}_{time.strftime("%d%H%M%S")}.csv"
