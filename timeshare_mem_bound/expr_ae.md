@@ -9,7 +9,7 @@
     pytest timeshare_mem_bound/test_membound_qwen_sweep_revet.py::test_static_tile -s
     ```
 
-* Time: small_c4(1m11),
+* Time: small_c4(1m11), full_c4(45m)
 
 * Note:
     The "performance_overhead(%)" column denotes the performance overhead over the baseline (128 parallel regions, 1 expert per region), which is the leftmost datapoint in Figure 8(a).

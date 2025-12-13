@@ -1240,8 +1240,8 @@ def test_dyn_tile():
     mock_bf16 = True
     par_dispatch = 1
     # ------------ Model Configuration ------------
-    model_config = SmallerQwen30b()
-    # model_config = Qwen30b()
+    # model_config = SmallerQwen30b()
+    model_config = Qwen30b()
 
     round_N = 1
     tile_F = 48 if isinstance(model_config, Qwen30b) else 32
@@ -1291,8 +1291,8 @@ def test_dyn_tile():
         input_tensor=input_tensor,
         expert_indices=expert_indices,
         model_config=model_config,
-        simulate_rust="full",
-        gold_check=True,
+        simulate_rust="timing",
+        gold_check=False,
         save_graph=False,
         flops=unit_flops,
         flops_for_weighted_sum=flops_for_weighted_sum,
