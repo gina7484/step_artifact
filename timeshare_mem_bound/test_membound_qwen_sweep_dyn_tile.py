@@ -1235,6 +1235,7 @@ def test_dyn_tile():
     fig_8_b = {
         "performance(cycles)": [],
         "compute_util(%)": [],
+        "performance_overhead(%)": [],
     }
     
     mock_bf16 = True

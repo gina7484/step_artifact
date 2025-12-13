@@ -630,11 +630,11 @@ def test_expert_tiling_sweep_single_schedule():
     }
 
     # ------------ Sim Conig ------------
-    simulate_mode = "full"
-    # simulate_mode = "timing"
+    # simulate_mode = "full"
+    simulate_mode = "timing"
     # simulate_mode = None
 
-    check_gold = True
+    check_gold = simulate_mode == "full"
 
     logging = False
 
@@ -648,7 +648,6 @@ def test_expert_tiling_sweep_single_schedule():
     # ------------ Batch Size ------------
     B = 64
 
-    csv_filename = f"expert_tiling_sweep_{tiling_schedule_name}_b{B}_dim{model_config.dim}_moe_inter_dim{model_config.moe_inter_dim}_{simulate_mode}.csv"
 
     # ------------ Compute Bandwidths ------------
     GATE_UP_COMPUTE_BW = 4096
@@ -901,20 +900,29 @@ def test_expert_tiling_sweep_single_schedule():
         result_metrics_list.append(result_metrics)
 
     # # ------------ Save to CSV ------------
-    if csv_filename is not None:
-        field_names = [field.name for field in fields(ResultMetrics)]
+    out_file = f"./hdl_validation/fig5.csv"
 
-        with open(csv_filename, "w", newline="", encoding="utf-8") as csvfile:
-            writer = csv.DictWriter(csvfile, fieldnames=field_names)
-
-            # Write header
+    try:
+        with open(out_file, "w", newline="", encoding="utf-8") as csvfile:
+            fieldnames = [
+                "tile_b",
+                "dim",
+                "tile_inter",
+                "cycles",
+                "off_chip_mem_traffic(MB)"
+            ]
+            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
             writer.writeheader()
-
-            # Write data rows
-            for metrics in result_metrics_list:
-                # Convert dataclass instance to dictionary
-                row_data = {
-                    field.name: getattr(metrics, field.name)
-                    for field in fields(metrics)
-                }
-                writer.writerow(row_data)
+            
+            for metrics, tiling_size in zip(result_metrics_list, tiling_schedule_to_test):
+                writer.writerow({
+                    "tile_b": tiling_size["tile_m"],
+                    "dim": model_config.dim,
+                    "tile_inter": tiling_size["tile_n"],
+                    "cycles": metrics.cycles,
+                    "off_chip_mem_traffic(MB)": round(metrics.off_chip_traffic / 1e6,2),
+                })
+    
+            print(f"Results written to {out_file}")
+    except Exception as e:
+        print(f"Error writing CSV file: {e}")
