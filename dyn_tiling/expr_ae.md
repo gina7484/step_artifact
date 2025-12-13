@@ -20,7 +20,7 @@
     pytest dyn_tiling/test_qwen_sweep.py::test_qwen_b64 -s
     ```
 
-* Time to run: small_c4 (46s), full_c4
+* Time to run: small_c4 (46s), full_c4(45m25s)
 
 # Figure 7
 

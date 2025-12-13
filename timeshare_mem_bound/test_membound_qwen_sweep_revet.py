@@ -1200,3 +1200,345 @@ def test_baseline_for_membound_timeshare():
         print(f"Results written to {out_file}")
     except Exception as e:
         print(f"Error writing CSV file: {e}")
+
+def test_static_tile():
+    fig_8_a = {
+        "performance(cycles)": [],
+        "compute_util(%)": [],
+        "performance_overhead(%)": [],
+    }
+
+    fig_9_a = {
+        "performance(cycles)": [],
+        "allocated_comp(flops/cycle)": [],
+        "on_chip_mem(KB)": [],
+    }
+    
+    fig_9_b = {
+        "performance(cycles)": [],
+        "off_chip_bandwidth_utilization(%)": [],
+    }
+
+
+    mock_bf16 = True
+    par_dispatch = 1
+    # ------------ Model Configuration ------------
+    # model_config = SmallerQwen30b()
+    model_config = Qwen30b()
+
+    tile_N =32
+    tile_F = 48 if isinstance(model_config, Qwen30b) else 32
+
+    base_flops = 1024  # unit flop for 128 case (no time sharing)
+    flops_for_weighted_sum = 1024  # fixed among sweep
+
+
+    # ------------ Expert Indices ------------
+    iter = 32
+    layer = 12
+    expert_selection_file = f"./dyn_tiling/expert_routing/qwen_b64/iter_{iter:03d}_layer_{layer:03d}.npz"
+    expert_indices_npz = np.load(expert_selection_file)
+    expert_indices = torch.from_numpy(
+        expert_indices_npz["data"]
+    )  # [B, n_activated_experts]
+
+    # expert_counts: [n_routed_experts] (bincount across all batches)
+    expert_counts = torch.bincount(
+        expert_indices.flatten(), minlength=model_config.n_routed_experts
+    )
+    
+
+    # ------------ Input generation -----------
+    B = expert_indices.shape[0]
+
+    # Set the random seed
+    seed = 5
+    torch.manual_seed(seed)
+
+    input_tensor = torch.randn(B, model_config.dim)
+
+    
+    #################### Basecase (parallel regions = 128) ####################
+    basecase_cycles = 0
+
+    unit_flops = base_flops
+    (
+        off_chip_traffic,
+        on_chip_requirement,
+        cycles,
+        duration_s,
+        unit_expert_on_chip,
+        allocated_comp_flops,
+    ) = run_ws_tile_mn_mk_revet(
+        tile_N=tile_N,
+        tile_F=tile_F,
+        input_tensor=input_tensor,
+        expert_indices=expert_indices,
+        model_config=model_config,
+        simulate_rust="timing",
+        gold_check=False,
+        save_graph=False,
+        flops=unit_flops,
+        flops_for_weighted_sum=flops_for_weighted_sum,
+        par_dispatch=par_dispatch,
+        mock_bf16=mock_bf16,
+        # logging=f"expert_par_gemm_n{tile_N}_f{tile_F}",
+    )
+
+    # ------------ substitue symbols in the off_chip_traffic and on_chip_requirement ------------
+    num_tiles = [
+        (routed_toks + tile_N - 1) // tile_N
+        for routed_toks in expert_counts.tolist()
+    ]
+    after_pad_batch_dim = [num_tiles_i * tile_N for num_tiles_i in num_tiles]
+
+    alg_flops = sum(
+        [
+            (
+                2 * b * model_config.dim * model_config.moe_inter_dim * 3
+            )  # 3 (Linear layers)
+            + b * model_config.moe_inter_dim  # 1 (Element-wise mult)
+            + (
+                8 * b * model_config.dim * model_config.moe_inter_dim
+            )  # silu_flops: 1(neg)+4(exp)+1(add)+1(div)+1(mul)= 8 FLOPs per element
+            for b in after_pad_batch_dim
+        ]
+    )
+
+    # ------------ substitue symbols in the off_chip_traffic and on_chip_requirement ------------
+    free_symbols = sorted(off_chip_traffic.free_symbols, key=str)
+
+    sub_dict = {
+        symbol: value
+        for symbol, value in zip(free_symbols, expert_counts.tolist())
+    }
+
+    off_chip_traffic_val = off_chip_traffic.subs(sub_dict)
+
+    # --------------- On-chip requirement ---------------
+    on_chip_requirement_val = (
+        on_chip_requirement
+        - expert_counts.tolist().count(0) * unit_expert_on_chip
+    )
+    # subtract the on-chip requirement for unselected experts
+
+    # ------------ Print the results ------------
+    off_chip_traffic_val = int(off_chip_traffic_val)
+    on_chip_requirement_val = int(on_chip_requirement_val)
+
+    fig_8_a["performance(cycles)"].append(cycles)
+    fig_8_a["compute_util(%)"].append(round(
+        (alg_flops / cycles) / allocated_comp_flops * 100, 2
+    ))
+    fig_8_a["performance_overhead(%)"].append(0.0)
+
+    fig_9_a["performance(cycles)"].append(cycles)
+    fig_9_a["allocated_comp(flops/cycle)"].append(
+        allocated_comp_flops
+    )
+    fig_9_a["on_chip_mem(KB)"].append(
+        round(on_chip_requirement_val / 1000, 2)
+    )
+
+    mem_bw = 1024  # (bytes/cycle)
+    fig_9_b["performance(cycles)"].append(cycles)
+    fig_9_b["off_chip_bandwidth_utilization(%)"].append(
+        round((off_chip_traffic_val/cycles)/mem_bw*100,2)
+    )
+
+    basecase_cycles = cycles
+
+    #################### Timeshare cases ####################
+    n_par_region_list = [64, 32, 16, 8, 4]
+    for n_par_region in n_par_region_list:
+        unit_flops = base_flops
+
+        (
+            off_chip_traffic,
+            on_chip_requirement,
+            cycles,
+            duration_s,
+            per_expert_accum_unit_on_chip,
+            expert_region_unit_on_chip,
+            allocated_comp_flops,
+        ) = run_timeshare_mn_mk_gemm_reshape_fixed_fanout_revet(
+            tile_N=tile_N,
+            tile_F=tile_F,
+            input_tensor=input_tensor,
+            expert_indices=expert_indices,
+            model_config=model_config,
+            simulate_rust="timing",
+            gold_check=False,
+            save_graph=False,
+            n_par_region=n_par_region,
+            flops=unit_flops,
+            flops_for_weighted_sum=flops_for_weighted_sum,
+            par_dispatch=par_dispatch,
+            mock_bf16=mock_bf16,
+            # logging=f"expert_par_gemm_n{tile_N}_f{tile_F}",
+        )
+
+        # ------------ Total FLOPs ------------------
+        num_tiles = [
+            (routed_toks + tile_N - 1) // tile_N
+            for routed_toks in expert_counts.tolist()
+        ]
+        after_pad_batch_dim = [
+            num_tiles_i * tile_N for num_tiles_i in num_tiles
+        ]
+        alg_flops = sum(
+            [
+                (
+                    2 * b * model_config.dim * model_config.moe_inter_dim * 3
+                )  # 3 (Linear layers)
+                + b * model_config.moe_inter_dim  # 1 (Element-wise mult)
+                + (
+                    8 * b * model_config.dim * model_config.moe_inter_dim
+                )  # silu_flops: 1(neg)+4(exp)+1(add)+1(div)+1(mul)= 8 FLOPs per element
+                for b in after_pad_batch_dim
+            ]
+        )
+
+        # ------------ substitue symbols in the off_chip_traffic and on_chip_requirement ------------
+        free_symbols = sorted(off_chip_traffic.free_symbols, key=str)
+
+        sub_dict = {
+            symbol: value
+            for symbol, value in zip(free_symbols, expert_counts.tolist())
+        }
+        # print(f"off_chip_traffic: {off_chip_traffic}")
+
+        off_chip_traffic_val = off_chip_traffic.subs(sub_dict)
+
+        # --------------- On-chip requirement ---------------
+        on_chip_requirement_val = (
+            on_chip_requirement
+            - expert_counts.tolist().count(0) * per_expert_accum_unit_on_chip
+        )
+        # subtract the on-chip requirement for unselected experts
+        token_per_region = []
+
+        # Iterate through the list in steps of n
+        for i in range(0, len(expert_counts.tolist()), 128 // n_par_region):
+            # Sum the next n elements (or remaining elements if less than n)
+            chunk_sum = sum(expert_counts.tolist()[i : i + 128 // n_par_region])
+            token_per_region.append(chunk_sum)
+
+        print(f"Unselected region: {token_per_region.count(0)}")
+        on_chip_requirement_val = (
+            on_chip_requirement_val
+            - token_per_region.count(0) * expert_region_unit_on_chip
+        )
+
+        # ------------ Print the results ------------
+        off_chip_traffic_val = int(off_chip_traffic_val)
+        on_chip_requirement_val = int(on_chip_requirement_val)
+
+        fig_8_a["performance(cycles)"].append(cycles)
+        fig_8_a["compute_util(%)"].append(round(
+            (alg_flops / cycles) / allocated_comp_flops * 100, 2
+        ))
+        fig_8_a["performance_overhead(%)"].append(int(cycles / basecase_cycles * 100) - 100)
+
+        fig_9_a["performance(cycles)"].append(cycles)
+        fig_9_a["allocated_comp(flops/cycle)"].append(
+            allocated_comp_flops
+        )
+        fig_9_a["on_chip_mem(KB)"].append(
+            round(on_chip_requirement_val / 1000, 2)
+        )
+
+        mem_bw = 1024  # (bytes/cycle)
+        fig_9_b["performance(cycles)"].append(cycles)
+        fig_9_b["off_chip_bandwidth_utilization(%)"].append(
+        round((off_chip_traffic_val/cycles)/mem_bw*100,2)
+        )
+    
+
+
+    out_file = f"./timeshare_mem_bound/fig_8_a.csv"
+    try:
+        with open(out_file, "w", newline="", encoding="utf-8") as csvfile:
+            writer = csv.writer(csvfile)
+
+            writer.writerow([
+                "Parallel_regions(experts_per_region)",
+                "128(1)",
+                "64(2)",
+                "32(4)",
+                "16(8)",
+                "8(16)",
+                "4(32)",
+            ])
+            writer.writerow(
+                ["performance(cycles)"] + fig_8_a["performance(cycles)"]
+            )
+            writer.writerow(
+                ["compute_util(%)"] + fig_8_a["compute_util(%)"]
+            )
+            writer.writerow(
+                ["performance_overhead(%)"] + fig_8_a["performance_overhead(%)"]
+            )
+
+        print(f"Results written to {out_file}")
+    except Exception as e:
+        print(f"Error writing CSV file: {e}")
+     
+
+
+
+    out_file = f"./timeshare_mem_bound/fig_9_a.csv"
+    try:
+        with open(out_file, "w", newline="", encoding="utf-8") as csvfile:
+            writer = csv.writer(csvfile)
+
+            writer.writerow([
+                "Parallel_regions(experts_per_region)",
+                "128(1)",
+                "64(2)",
+                "32(4)",
+                "16(8)",
+                "8(16)",
+                "4(32)",
+            ])
+            writer.writerow(
+                ["performance(cycles)"] + fig_9_a["performance(cycles)"]
+            )
+            writer.writerow(
+                ["allocated_comp(flops/cycle)"] + fig_9_a["allocated_comp(flops/cycle)"]
+            )
+            writer.writerow(
+                ["on_chip_mem(KB)"] + fig_9_a["on_chip_mem(KB)"]
+            )
+
+        print(f"Results written to {out_file}")
+    except Exception as e:
+        print(f"Error writing CSV file: {e}")
+        
+
+
+    out_file = f"./timeshare_mem_bound/fig_9_b.csv"
+    try:
+        with open(out_file, "w", newline="", encoding="utf-8") as csvfile:
+            writer = csv.writer(csvfile)
+
+            writer.writerow([
+                "Parallel_regions(experts_per_region)",
+                "128(1)",
+                "64(2)",
+                "32(4)",
+                "16(8)",
+                "8(16)",
+                "4(32)",
+            ])
+            writer.writerow(
+                ["performance(cycles)"] + fig_9_b["performance(cycles)"]
+            )
+            writer.writerow(
+                ["off_chip_bandwidth_utilization(%)"] + fig_9_b["off_chip_bandwidth_utilization(%)"]
+            )
+
+        print(f"Results written to {out_file}")
+    except Exception as e:
+        print(f"Error writing CSV file: {e}")
+        
