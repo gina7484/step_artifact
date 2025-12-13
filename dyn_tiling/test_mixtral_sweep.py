@@ -345,8 +345,8 @@ def test_gemm_dyn_tile():
 def test_mixtral_b64():
     mock_bf16 = True
     
-    model_config = SmallerMixtral()
-    # model_config = Mixtral8x7b()
+    # model_config = SmallerMixtral()
+    model_config = Mixtral8x7b()
 
 
     # ------------ Expert Indices ------------
@@ -495,9 +495,9 @@ def test_mixtral_b64():
 
     on_chip_requirement_val = on_chip_requirement.subs(sub_dict)
 
-    dyn_cycles = cycles
-    dyn_off_chip_traffic = off_chip_traffic_val
-    dyn_on_chip_mem = on_chip_requirement_val
+    dyn_cycles = int(cycles)
+    dyn_off_chip_traffic = int(off_chip_traffic_val)
+    dyn_on_chip_mem = int(on_chip_requirement_val)
 
     result_dict_raw["cycles"]["tile=dynamic"] = dyn_cycles
     result_dict_raw["off_chip_traffic"]["tile=dynamic"] = dyn_off_chip_traffic
@@ -573,6 +573,10 @@ def test_mixtral_b64():
 
     off_chip_traffic_val = off_chip_traffic.subs(sub_dict)
 
+    cycles = int(cycles)
+    off_chip_traffic_val = int(off_chip_traffic_val)
+    on_chip_requirement = int(on_chip_requirement)
+
     result_dict_raw["cycles"]["tile=16"] = cycles
     result_dict_raw["off_chip_traffic"]["tile=16"] = off_chip_traffic_val
     result_dict_raw["on_chip_mem"]["tile=16"] = on_chip_requirement
@@ -647,6 +651,10 @@ def test_mixtral_b64():
 
     off_chip_traffic_val = off_chip_traffic.subs(sub_dict)
 
+    cycles = int(cycles)
+    off_chip_traffic_val = int(off_chip_traffic_val)
+    on_chip_requirement = int(on_chip_requirement)
+
     result_dict_raw["cycles"]["tile=64"] = cycles
     result_dict_raw["off_chip_traffic"]["tile=64"] = off_chip_traffic_val
     result_dict_raw["on_chip_mem"]["tile=64"] = on_chip_requirement
@@ -713,3 +721,4 @@ def test_mixtral_b64():
         print(f"Results written to {out_file}")
     except Exception as e:
         print(f"Error writing CSV file: {e}")
+    
